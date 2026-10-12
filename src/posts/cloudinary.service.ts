@@ -1,8 +1,25 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
+import { Agent, FormData, fetch as undiciFetch } from 'undici';
 
 import { PostMedia } from './schemas/post.schema';
+
+const CONNECT_TIMEOUT_MS = 30_000;
+const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
+const VIDEO_UPLOAD_TIMEOUT_MS = 15 * 60_000;
+
+const imageDispatcher = new Agent({
+  connectTimeout: CONNECT_TIMEOUT_MS,
+  headersTimeout: IMAGE_UPLOAD_TIMEOUT_MS,
+  bodyTimeout: IMAGE_UPLOAD_TIMEOUT_MS,
+});
+
+const videoDispatcher = new Agent({
+  connectTimeout: CONNECT_TIMEOUT_MS,
+  headersTimeout: VIDEO_UPLOAD_TIMEOUT_MS,
+  bodyTimeout: VIDEO_UPLOAD_TIMEOUT_MS,
+});
 
 export type UploadableFile = {
   buffer: Buffer;
@@ -19,11 +36,14 @@ type CloudinaryUploadResponse = {
   width?: number;
   height?: number;
   bytes?: number;
+  duration?: number;
   error?: { message?: string };
 };
 
 @Injectable()
 export class CloudinaryService {
+  private readonly logger = new Logger(CloudinaryService.name);
+
   constructor(private readonly configService: ConfigService) {}
 
   async upload(file: UploadableFile): Promise<PostMedia> {
@@ -45,13 +65,25 @@ export class CloudinaryService {
     form.append('signature', signature);
     form.append('folder', folder);
 
-    const response = await fetch(
-      `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`,
-      { method: 'POST', body: form },
-    );
-    const body = (await response.json()) as CloudinaryUploadResponse;
+    let response: Awaited<ReturnType<typeof undiciFetch>>;
+    try {
+      response = await undiciFetch(`https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`, {
+        method: 'POST',
+        body: form,
+        dispatcher: resourceType === 'video' ? videoDispatcher : imageDispatcher,
+      });
+    } catch (err) {
+      throw this.uploadFailed(resourceType, err);
+    }
+
+    let body: CloudinaryUploadResponse;
+    try {
+      body = (await response.json()) as CloudinaryUploadResponse;
+    } catch (err) {
+      throw this.uploadFailed(resourceType, err);
+    }
     if (!response.ok || !body.public_id || !body.secure_url) {
-      throw new BadRequestException(body.error?.message || 'Cloudinary upload failed');
+      throw new BadRequestException(body.error?.message || this.friendlyMessage(resourceType));
     }
 
     return {
@@ -62,7 +94,21 @@ export class CloudinaryService {
       width: body.width ?? null,
       height: body.height ?? null,
       bytes: body.bytes ?? file.size,
+      duration: body.duration ?? null,
     };
+  }
+
+  private uploadFailed(resourceType: 'image' | 'video', err: unknown): BadRequestException {
+    const cause = err instanceof Error && 'cause' in err ? err.cause : err;
+    const detail = cause instanceof Error ? cause.message : 'unknown error';
+    this.logger.warn(`Cloudinary ${resourceType} upload failed: ${detail}`);
+    return new BadRequestException(this.friendlyMessage(resourceType));
+  }
+
+  private friendlyMessage(resourceType: 'image' | 'video'): string {
+    return resourceType === 'video'
+      ? 'The video could not be uploaded. Please try again.'
+      : 'The image could not be uploaded. Please try again.';
   }
 
   private required(name: string): string {
