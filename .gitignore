@@ -1,0 +1,10 @@
+/dist
+/node_modules
+/coverage
+.DS_Store
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+*.log
