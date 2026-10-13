@@ -13,6 +13,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 
 import { FacebookAuthService } from '../connected-accounts/facebook-auth.service';
+import { InstagramAuthService } from '../connected-accounts/instagram-auth.service';
 import { SkipOriginCheck } from './decorators/skip-origin-check.decorator';
 import { ExchangeGoogleDto } from './dto/exchange-google.dto';
 import { GoogleAuthService } from './google-auth.service';
@@ -23,6 +24,7 @@ export class AuthController {
   constructor(
     private readonly googleAuthService: GoogleAuthService,
     private readonly facebookAuthService: FacebookAuthService,
+    private readonly instagramAuthService: InstagramAuthService,
   ) {}
 
   @Get('google')
@@ -73,6 +75,27 @@ export class AuthController {
       code,
       state,
       error,
+      errorDescription,
+    });
+    return res.redirect(redirectUrl);
+  }
+
+  @Get('instagram/callback')
+  @SkipOriginCheck()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async instagramCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+    @Query('error_reason') errorReason: string | undefined,
+    @Query('error_description') errorDescription: string | undefined,
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.instagramAuthService.handleCallback({
+      code,
+      state,
+      error,
+      errorReason,
       errorDescription,
     });
     return res.redirect(redirectUrl);

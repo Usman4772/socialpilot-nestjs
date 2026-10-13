@@ -21,7 +21,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UploadableFile } from './cloudinary.service';
 import { PostsService } from './posts.service';
-import { FacebookPostType } from './schemas/post.schema';
+import { FacebookPostType, InstagramPostType } from './schemas/post.schema';
 
 const upload = FilesInterceptor('files', 10, {
   limits: { fileSize: 100 * 1024 * 1024, files: 10 },
@@ -48,6 +48,14 @@ export class PostsController {
     @UploadedFiles() files: UploadableFile[] | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
+    @Body('instagramAccountIds') instagramAccountIds?: string | string[],
+    @Body('instagramPostType') instagramPostType?: string,
+    @Body('instagramCaption') instagramCaption?: string,
+    @Body('instagramUserTags') instagramUserTags?: string,
+    @Body('instagramCollaborators') instagramCollaborators?: string,
+    @Body('instagramAddOn') instagramAddOn?: string,
+    @Body('instagramPollOptions') instagramPollOptions?: string,
+    @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
     @Body('firstComment') firstComment?: string,
     @Body('postType') postType?: string,
     @Body('videoTitle') videoTitle?: string,
@@ -60,6 +68,10 @@ export class PostsController {
       draftId: draftId?.trim() || undefined,
       caption: typeof caption === 'string' ? caption : '',
       pageIds: this.optionalIds(pageIds),
+      instagramAccountIds: this.optionalIds(instagramAccountIds),
+      instagramPostType: this.instagramPostType(instagramPostType),
+      instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
+      ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
       files: files ?? [],
       keepPublicIds: this.optionalIds(keepPublicIds),
       postType: this.postType(postType),
@@ -89,6 +101,14 @@ export class PostsController {
     @UploadedFiles() files: UploadableFile[] | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
+    @Body('instagramAccountIds') instagramAccountIds?: string | string[],
+    @Body('instagramPostType') instagramPostType?: string,
+    @Body('instagramCaption') instagramCaption?: string,
+    @Body('instagramUserTags') instagramUserTags?: string,
+    @Body('instagramCollaborators') instagramCollaborators?: string,
+    @Body('instagramAddOn') instagramAddOn?: string,
+    @Body('instagramPollOptions') instagramPollOptions?: string,
+    @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
     @Body('firstComment') firstComment?: string,
     @Body('commentPageIds') commentPageIds?: string | string[],
     @Body('postType') postType?: string,
@@ -103,7 +123,11 @@ export class PostsController {
     return this.postsService.schedule({
       userId: authUser.userId,
       caption: typeof caption === 'string' ? caption : '',
-      pageIds: this.pageIds(pageIds),
+      pageIds: this.optionalIds(pageIds),
+      instagramAccountIds: this.optionalIds(instagramAccountIds),
+      instagramPostType: this.instagramPostType(instagramPostType),
+      instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
+      ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
       files: files ?? [],
       keepPublicIds: this.optionalIds(keepPublicIds),
       draftId: draftId?.trim() || undefined,
@@ -142,6 +166,14 @@ export class PostsController {
     @UploadedFiles() files: UploadableFile[] | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
+    @Body('instagramAccountIds') instagramAccountIds?: string | string[],
+    @Body('instagramPostType') instagramPostType?: string,
+    @Body('instagramCaption') instagramCaption?: string,
+    @Body('instagramUserTags') instagramUserTags?: string,
+    @Body('instagramCollaborators') instagramCollaborators?: string,
+    @Body('instagramAddOn') instagramAddOn?: string,
+    @Body('instagramPollOptions') instagramPollOptions?: string,
+    @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
     @Body('firstComment') firstComment?: string,
     @Body('commentPageIds') commentPageIds?: string | string[],
     @Body('postType') postType?: string,
@@ -153,7 +185,11 @@ export class PostsController {
     return this.postsService.publishFeed({
       userId: authUser.userId,
       caption: typeof caption === 'string' ? caption : '',
-      pageIds: this.pageIds(pageIds),
+      pageIds: this.optionalIds(pageIds),
+      instagramAccountIds: this.optionalIds(instagramAccountIds),
+      instagramPostType: this.instagramPostType(instagramPostType),
+      instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
+      ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
       files: files ?? [],
       keepPublicIds: this.optionalIds(keepPublicIds),
       draftId: draftId?.trim() || undefined,
@@ -165,24 +201,38 @@ export class PostsController {
     });
   }
 
+  private instagramExtras(
+    instagramUserTags?: string,
+    instagramCollaborators?: string,
+    instagramAddOn?: string,
+    instagramPollOptions?: string,
+    instagramPollOpenEnded?: string,
+  ) {
+    return {
+      instagramUserTags: typeof instagramUserTags === 'string' ? instagramUserTags : undefined,
+      instagramCollaborators: typeof instagramCollaborators === 'string' ? instagramCollaborators : undefined,
+      instagramAddOn: typeof instagramAddOn === 'string' ? instagramAddOn : undefined,
+      instagramPollOptions: typeof instagramPollOptions === 'string' ? instagramPollOptions : undefined,
+      instagramPollOpenEnded: instagramPollOpenEnded === 'true',
+    };
+  }
+
   private postType(value: string | undefined): FacebookPostType {
     if (value === 'story' || value === 'carousel' || value === 'feed' || value === 'reel') return value;
     if (!value) return 'feed';
     throw new BadRequestException('Choose Feed, Reel, Story, or Carousel.');
   }
 
+  private instagramPostType(value: string | undefined): InstagramPostType | undefined {
+    if (!value) return undefined;
+    if (value === 'feed' || value === 'reel' || value === 'story') return value;
+    throw new BadRequestException('Choose an Instagram Feed post, Reel, or Story.');
+  }
+
   private aiFlag(value: string | undefined): boolean | null {
     if (value === 'yes') return true;
     if (value === 'no') return false;
     return null;
-  }
-
-  private pageIds(value: string | string[] | undefined): string[] {
-    const ids = this.optionalIds(value);
-    if (ids.length === 0) {
-      throw new BadRequestException('Select at least one connected Facebook Page.');
-    }
-    return ids;
   }
 
   private optionalIds(value: string | string[] | undefined): string[] {

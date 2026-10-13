@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { Agent, FormData, fetch as undiciFetch } from 'undici';
 
+import { isDevelopment } from '../common/utils/environment';
 import { PostMedia } from './schemas/post.schema';
 
 const CONNECT_TIMEOUT_MS = 30_000;
@@ -48,6 +49,10 @@ export class CloudinaryService {
 
   async upload(file: UploadableFile): Promise<PostMedia> {
     const resourceType = file.mimetype.startsWith('video/') ? 'video' : 'image';
+    const started = Date.now();
+    if (isDevelopment()) {
+      this.logger.log(`Uploading ${resourceType} (${file.size} bytes, ${file.mimetype})`);
+    }
     const cloudName = this.required('CLOUDINARY_CLOUD_NAME');
     const apiKey = this.required('CLOUDINARY_API_KEY');
     const apiSecret = this.required('CLOUDINARY_API_SECRET');
@@ -84,6 +89,9 @@ export class CloudinaryService {
     }
     if (!response.ok || !body.public_id || !body.secure_url) {
       throw new BadRequestException(body.error?.message || this.friendlyMessage(resourceType));
+    }
+    if (isDevelopment()) {
+      this.logger.log(`Uploaded ${resourceType} ${body.public_id} in ${Date.now() - started}ms`);
     }
 
     return {

@@ -7,6 +7,26 @@ export type PostPublishStatus = (typeof postPublishStatuses)[number];
 export const postTypes = ['feed', 'reel', 'story', 'carousel'] as const;
 export type FacebookPostType = (typeof postTypes)[number];
 
+export const instagramPostTypes = ['feed', 'reel', 'story'] as const;
+export type InstagramPostType = (typeof instagramPostTypes)[number];
+
+export const instagramAddOns = ['none', 'poll', 'comment_prompt'] as const;
+export type InstagramAddOn = (typeof instagramAddOns)[number];
+
+@Schema({ _id: false })
+export class InstagramUserTag {
+  @Prop({ required: true })
+  username: string;
+
+  @Prop({ type: Number, default: null })
+  x?: number | null;
+
+  @Prop({ type: Number, default: null })
+  y?: number | null;
+}
+
+export const InstagramUserTagSchema = SchemaFactory.createForClass(InstagramUserTag);
+
 export const postStatuses = ['draft', 'scheduled', 'publishing', 'published', 'partially_failed', 'failed', 'canceled'] as const;
 export type PostStatus = (typeof postStatuses)[number];
 
@@ -73,6 +93,64 @@ export class FacebookPostTarget {
 
 export const FacebookPostTargetSchema = SchemaFactory.createForClass(FacebookPostTarget);
 
+@Schema({ _id: true })
+export class InstagramPostTarget {
+  _id?: Types.ObjectId;
+
+  @Prop({ required: true })
+  connectedAccountId: string;
+
+  @Prop({ required: true })
+  accountId: string;
+
+  @Prop({ required: true })
+  name: string;
+
+  @Prop({ type: String, default: null })
+  username?: string | null;
+
+  @Prop({ required: true, enum: instagramPostTypes })
+  postType: InstagramPostType;
+
+  @Prop({ type: String, default: '' })
+  caption: string;
+
+  @Prop({ type: [InstagramUserTagSchema], default: [] })
+  userTags: InstagramUserTag[];
+
+  @Prop({ type: [String], default: [] })
+  collaborators: string[];
+
+  @Prop({ type: String, enum: instagramAddOns, default: 'none' })
+  addOn: InstagramAddOn;
+
+  @Prop({ type: [String], default: [] })
+  pollOptions: string[];
+
+  @Prop({ type: Boolean, default: false })
+  pollOpenEnded: boolean;
+
+  @Prop({ type: String, default: null })
+  instagramMediaId?: string | null;
+
+  @Prop({ type: String, default: null })
+  firstCommentId?: string | null;
+
+  @Prop({ type: String, default: null })
+  firstCommentError?: string | null;
+
+  @Prop({ required: true, enum: postPublishStatuses, default: 'pending' })
+  status: PostPublishStatus;
+
+  @Prop({ type: Date, default: null })
+  publishedAt?: Date | null;
+
+  @Prop({ type: String, default: null })
+  error?: string | null;
+}
+
+export const InstagramPostTargetSchema = SchemaFactory.createForClass(InstagramPostTarget);
+
 @Schema({ timestamps: true, collection: 'posts' })
 export class Post {
   @Prop({ required: true, index: true })
@@ -123,8 +201,8 @@ export class Post {
   @Prop({ type: [FacebookPostTargetSchema], default: [] })
   facebook: FacebookPostTarget[];
 
-  @Prop({ type: [Object], default: [] })
-  instagram: Record<string, unknown>[];
+  @Prop({ type: [InstagramPostTargetSchema], default: [] })
+  instagram: InstagramPostTarget[];
 
   @Prop({ type: [Object], default: [] })
   linkedin: Record<string, unknown>[];

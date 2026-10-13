@@ -2,16 +2,27 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { config as loadEnv } from 'dotenv';
 
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { requestLogger } from './common/middleware/request-logger';
 import {
   isOriginAllowed,
   parseAllowedOrigins,
 } from './common/utils/allowed-origins.util';
+import { isDevelopment } from './common/utils/environment';
+
+loadEnv();
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const development = isDevelopment();
+  const app = await NestFactory.create(AppModule, {
+    logger: development ? ['log', 'error', 'warn', 'debug'] : ['error', 'warn'],
+  });
+  if (development) {
+    app.use(requestLogger);
+  }
   app.useGlobalFilters(new AllExceptionsFilter());
   app.useGlobalPipes(
     new ValidationPipe({

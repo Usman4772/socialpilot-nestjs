@@ -28,6 +28,13 @@ type FacebookPageResponse = {
   picture?: { data?: { url?: string } };
 };
 
+type InstagramProfile = {
+  id?: string;
+  username?: string;
+  name?: string;
+  profile_picture_url?: string;
+};
+
 const DEFAULT_SCOPES = [
   'pages_show_list',
   'pages_manage_posts',
@@ -35,6 +42,9 @@ const DEFAULT_SCOPES = [
   'pages_read_engagement',
   'pages_read_user_content',
   'business_management',
+  'instagram_basic',
+  'instagram_content_publish',
+  'instagram_manage_comments',
   'public_profile',
 ];
 
@@ -130,12 +140,23 @@ export class FacebookAuthService {
         })),
       );
 
-      return {
-        redirectUrl: this.accountsRedirect(frontend, {
-          facebook: 'connected',
-          pages: String(pages.length),
-        }),
+      const instagram = await this.discoverInstagram(pages);
+      const instagramCount = await this.connectedAccountsService.saveInstagramAccounts(
+        state.workspaceId,
+        state.userId,
+        instagram.accounts,
+        instagram.checkedPageIds,
+      );
+
+      const query: Record<string, string> = {
+        facebook: 'connected',
+        pages: String(pages.length),
+        instagram: String(instagramCount),
       };
+      if (instagram.unavailable) {
+        query.instagramUnavailable = '1';
+      }
+      return { redirectUrl: this.accountsRedirect(frontend, query) };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Facebook connection failed.';
       this.logger.warn(`Facebook callback failed: ${message}`);
@@ -191,6 +212,78 @@ export class FacebookAuthService {
       nextUrl = body.paging?.next ?? null;
     }
     return pages;
+  }
+
+  private async discoverInstagram(pages: FacebookPageResponse[]): Promise<{
+    accounts: Array<{
+      accountId: string;
+      name: string;
+      username: string | null;
+      profileImageUrl: string | null;
+      facebookPageId: string;
+    }>;
+    checkedPageIds: string[];
+    unavailable: boolean;
+  }> {
+    const accounts: Array<{
+      accountId: string;
+      name: string;
+      username: string | null;
+      profileImageUrl: string | null;
+      facebookPageId: string;
+    }> = [];
+    const checkedPageIds: string[] = [];
+
+    for (const page of pages) {
+      if (!page.access_token) continue;
+      try {
+        const profile = await this.instagramForPage(page.id, page.access_token);
+        checkedPageIds.push(page.id);
+        if (!profile?.id) continue;
+        const username = profile.username?.trim() || null;
+        accounts.push({
+          accountId: profile.id,
+          name: profile.name?.trim() || username || 'Instagram',
+          username,
+          profileImageUrl: profile.profile_picture_url?.trim() || null,
+          facebookPageId: page.id,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Instagram lookup failed for page ${page.id}: ${err instanceof Error ? err.message : 'unknown error'}`,
+        );
+      }
+    }
+
+    return { accounts, checkedPageIds, unavailable: pages.length > 0 && checkedPageIds.length === 0 };
+  }
+
+  private async instagramForPage(pageId: string, pageToken: string): Promise<InstagramProfile | null> {
+    try {
+      return await this.readInstagramAccount(
+        pageId,
+        pageToken,
+        'instagram_business_account{id,username,name,profile_picture_url}',
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Instagram profile fields failed for page ${pageId}: ${err instanceof Error ? err.message : 'unknown error'}`,
+      );
+      return this.readInstagramAccount(pageId, pageToken, 'instagram_business_account');
+    }
+  }
+
+  private async readInstagramAccount(
+    pageId: string,
+    pageToken: string,
+    fields: string,
+  ): Promise<InstagramProfile | null> {
+    const body = await this.fetchJson<{ instagram_business_account?: InstagramProfile }>(
+      `/${this.graphVersion()}/${pageId}`,
+      pageToken,
+      { fields },
+    );
+    return body.instagram_business_account?.id ? body.instagram_business_account : null;
   }
 
   private async fetchToken(params: Record<string, string>): Promise<string> {

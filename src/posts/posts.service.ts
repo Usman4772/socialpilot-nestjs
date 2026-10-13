@@ -6,11 +6,40 @@ import { ConnectedAccountsService } from '../connected-accounts/connected-accoun
 import { UsersService } from '../users/users.service';
 import { CloudinaryService, UploadableFile } from './cloudinary.service';
 import { FacebookGraphError, FacebookPublishService } from './facebook-publish.service';
+import { InstagramGraphError, InstagramPublishService } from './instagram-publish.service';
 import { isRetryablePublishError, PostScheduleService } from './post-schedule.service';
-import { FacebookPostType, Post, PostDocument, PostMedia, PostStatus } from './schemas/post.schema';
+import {
+  FacebookPostType,
+  InstagramAddOn,
+  InstagramPostType,
+  Post,
+  PostDocument,
+  PostMedia,
+  PostStatus,
+} from './schemas/post.schema';
+
+type InstagramUserTagInput = { username: string; x: number | null; y: number | null };
+
+type InstagramDetails = {
+  userTags: InstagramUserTagInput[];
+  collaborators: string[];
+  addOn: InstagramAddOn;
+  pollOptions: string[];
+  pollOpenEnded: boolean;
+};
+
+const EMPTY_INSTAGRAM_DETAILS: InstagramDetails = {
+  userTags: [],
+  collaborators: [],
+  addOn: 'none',
+  pollOptions: [],
+  pollOpenEnded: false,
+};
 
 const CAPTION_LIMIT = 63206;
+const INSTAGRAM_CAPTION_LIMIT = 2200;
 const COMMENT_LIMIT = 8000;
+const INSTAGRAM_COMMENT_LIMIT = 2200;
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif']);
 const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm']);
 
@@ -25,11 +54,30 @@ export type PublicPost = {
   scheduledAt: Date | null;
   scheduleTimezone: string | null;
   media: PostMedia[];
-  facebook: Array<{
+    facebook: Array<{
     connectedAccountId: string;
     pageId: string;
     pageName: string;
     facebookPostId: string | null;
+    status: 'pending' | 'published' | 'failed';
+    publishedAt: Date | null;
+    error: string | null;
+    firstCommentId: string | null;
+    firstCommentError: string | null;
+  }>;
+  instagram: Array<{
+    connectedAccountId: string;
+    accountId: string;
+    name: string;
+    username: string | null;
+    postType: InstagramPostType;
+    caption: string;
+    userTags: InstagramUserTagInput[];
+    collaborators: string[];
+    addOn: InstagramAddOn;
+    pollOptions: string[];
+    pollOpenEnded: boolean;
+    instagramMediaId: string | null;
     status: 'pending' | 'published' | 'failed';
     publishedAt: Date | null;
     error: string | null;
@@ -51,6 +99,7 @@ export class PostsService {
     private readonly connectedAccountsService: ConnectedAccountsService,
     private readonly cloudinaryService: CloudinaryService,
     private readonly facebookPublishService: FacebookPublishService,
+    private readonly instagramPublishService: InstagramPublishService,
     @Inject(forwardRef(() => PostScheduleService))
     private readonly postScheduleService: PostScheduleService,
   ) {}
@@ -76,6 +125,14 @@ export class PostsService {
     draftId?: string;
     caption: string;
     pageIds: string[];
+    instagramAccountIds?: string[];
+    instagramPostType?: InstagramPostType;
+    instagramCaption?: string;
+    instagramUserTags?: string;
+    instagramCollaborators?: string;
+    instagramAddOn?: string;
+    instagramPollOptions?: string;
+    instagramPollOpenEnded?: boolean;
     files: UploadableFile[];
     keepPublicIds?: string[];
     postType: FacebookPostType;
@@ -85,30 +142,46 @@ export class PostsService {
   }): Promise<PublicPost> {
     const caption = input.caption ?? '';
     const firstComment = input.firstComment?.trim() || '';
+    const pageIds = this.uniqueIds(input.pageIds);
+    const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+      throw new BadRequestException('Select at least one connected account.');
+    }
     if (Array.from(caption).length > CAPTION_LIMIT) {
       throw new BadRequestException('Facebook text is over 63,206 characters.');
     }
     if (Array.from(firstComment).length > COMMENT_LIMIT) {
       throw new BadRequestException('A Facebook comment is limited to 8,000 characters.');
     }
-    this.assertContent(input.postType, caption, input.files, input.keepPublicIds?.length ?? 0);
+    if (pageIds.length > 0) {
+      this.assertContent(input.postType, caption, input.files, input.keepPublicIds?.length ?? 0);
+    }
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
     if (!user || !membership) {
-      throw new BadRequestException('Connect a Facebook Page before saving a draft.');
+      throw new BadRequestException('Connect an account before saving a draft.');
     }
-    const targets = await this.targetsFor(membership.workspaceId, input.pageIds);
+    const targets = pageIds.length > 0 ? await this.targetsFor(membership.workspaceId, pageIds) : [];
+    const instagramTargets =
+      instagramAccountIds.length > 0 ? await this.instagramTargetsFor(membership.workspaceId, instagramAccountIds) : [];
     const uploaded = await this.uploadFiles(input.files);
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
     const media = [...kept, ...uploaded];
-    this.assertStored(input.postType, input.caption ?? '', media);
+    if (pageIds.length > 0) this.assertStored(input.postType, input.caption ?? '', media);
+    const instagramPostType = input.instagramPostType ?? 'feed';
+    const instagramCaption = input.instagramCaption ?? caption;
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    const instagramDetails =
+      instagramTargets.length > 0
+        ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
+        : EMPTY_INSTAGRAM_DETAILS;
     const fields = {
       caption: input.caption ?? '',
       firstComment: input.firstComment?.trim() || null,
       videoTitle: input.videoTitle?.trim() || null,
       aiGenerated: input.aiGenerated ?? null,
-      postType: input.postType,
+      postType: pageIds.length > 0 ? input.postType : instagramPostType,
       status: 'draft' as const,
       media,
       facebook: targets.map((target) => ({
@@ -122,6 +195,7 @@ export class PostsService {
         firstCommentId: null,
         firstCommentError: null,
       })),
+      instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
       completedAt: null,
     };
     if (existing) {
@@ -132,7 +206,6 @@ export class PostsService {
     const doc = await this.postModel.create({
       userId: user.id,
       workspaceId: membership.workspaceId,
-      instagram: [],
       linkedin: [],
       tiktok: [],
       ...fields,
@@ -152,9 +225,22 @@ export class PostsService {
     aiGenerated?: boolean | null;
     firstComment?: string;
     commentPageIds?: string[];
+    instagramAccountIds?: string[];
+    instagramPostType?: InstagramPostType;
+    instagramCaption?: string;
+    instagramUserTags?: string;
+    instagramCollaborators?: string;
+    instagramAddOn?: string;
+    instagramPollOptions?: string;
+    instagramPollOpenEnded?: boolean;
   }): Promise<PublicPost> {
     const caption = input.caption ?? '';
     const firstComment = input.firstComment?.trim() || '';
+    const pageIds = this.uniqueIds(input.pageIds);
+    const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+      throw new BadRequestException('Select at least one connected account.');
+    }
     if (Array.from(caption).length > CAPTION_LIMIT) {
       throw new BadRequestException('Facebook text is over 63,206 characters.');
     }
@@ -162,31 +248,45 @@ export class PostsService {
       throw new BadRequestException('A Facebook comment is limited to 8,000 characters.');
     }
 
-    const pageIds = [...new Set(input.pageIds.map((id) => id.trim()).filter(Boolean))];
-    if (pageIds.length === 0) {
-      throw new BadRequestException('Select at least one connected Facebook Page.');
-    }
-
     const postType = input.postType ?? 'feed';
     const files = input.files ?? [];
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
-    this.assertContent(postType, caption, files, kept.length);
+    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.length);
 
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
     if (!user || !membership) {
-      throw new BadRequestException('Connect a Facebook Page before publishing.');
+      throw new BadRequestException('Connect an account before publishing.');
     }
 
-    const targets = await this.targetsFor(membership.workspaceId, pageIds);
+    const targets = pageIds.length > 0 ? await this.targetsFor(membership.workspaceId, pageIds) : [];
+    const instagramTargets =
+      instagramAccountIds.length > 0 ? await this.instagramTargetsFor(membership.workspaceId, instagramAccountIds) : [];
+    const instagramPostType = input.instagramPostType ?? 'feed';
+    const instagramCaption = input.instagramCaption ?? caption;
 
     const commentTargets = new Set(
-      (input.commentPageIds?.length ? input.commentPageIds : pageIds).map((id) => id.trim()),
+      this.commentAccountIds({
+        pageIds,
+        facebookPostType: postType,
+        instagramAccountIds,
+        instagramPostType,
+        requested: input.commentPageIds ?? [],
+        firstComment,
+      }),
     );
+    if ([...commentTargets].some((id) => instagramAccountIds.includes(id)) && Array.from(firstComment).length > INSTAGRAM_COMMENT_LIMIT) {
+      throw new BadRequestException('An Instagram comment is limited to 2,200 characters.');
+    }
 
     const media = [...kept, ...(await this.uploadFiles(files))];
-    this.assertStored(postType, caption, media);
+    if (pageIds.length > 0) this.assertStored(postType, caption, media);
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    const instagramDetails =
+      instagramTargets.length > 0
+        ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
+        : EMPTY_INSTAGRAM_DETAILS;
     const videoTitle = input.videoTitle?.trim() || null;
     const aiGenerated = input.aiGenerated ?? null;
 
@@ -195,11 +295,12 @@ export class PostsService {
       (await this.postModel.create({
         userId: user.id,
         workspaceId: membership.workspaceId,
-        instagram: [],
+        instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
         linkedin: [],
         tiktok: [],
         caption,
-        firstComment: firstComment || null,
+        firstComment: commentTargets.size > 0 ? firstComment || null : null,
+        commentPageIds: [...commentTargets],
         videoTitle,
         aiGenerated,
         postType,
@@ -220,12 +321,14 @@ export class PostsService {
       }));
     if (existing) {
       existing.caption = caption;
-      existing.firstComment = firstComment || null;
+      existing.firstComment = commentTargets.size > 0 ? firstComment || null : null;
+      existing.commentPageIds = [...commentTargets];
       existing.videoTitle = videoTitle;
       existing.aiGenerated = aiGenerated;
-      existing.postType = postType;
+      existing.postType = pageIds.length > 0 ? postType : instagramPostType;
       existing.status = 'publishing';
       existing.media = media;
+      existing.instagram = this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails);
       existing.facebook = targets.map((target) => ({
         connectedAccountId: target.connectedAccountId,
         pageId: target.pageId,
@@ -286,8 +389,10 @@ export class PostsService {
       await doc.save();
     }
 
-    const failed = doc.facebook.filter((item) => item.status === 'failed').length;
-    if (failed === doc.facebook.length) {
+    await this.publishInstagramTargets(doc, false);
+    const entries = [...doc.facebook, ...doc.instagram];
+    const failed = entries.filter((item) => item.status === 'failed').length;
+    if (entries.length > 0 && failed === entries.length) {
       doc.status = 'draft';
       doc.completedAt = null;
     } else {
@@ -310,6 +415,14 @@ export class PostsService {
     aiGenerated?: boolean | null;
     firstComment?: string;
     commentPageIds?: string[];
+    instagramAccountIds?: string[];
+    instagramPostType?: InstagramPostType;
+    instagramCaption?: string;
+    instagramUserTags?: string;
+    instagramCollaborators?: string;
+    instagramAddOn?: string;
+    instagramPollOptions?: string;
+    instagramPollOpenEnded?: boolean;
     scheduledAt: string;
     timezone?: string;
   }): Promise<PublicPost> {
@@ -438,7 +551,8 @@ export class PostsService {
       await doc.save();
     }
 
-    if (retry) throw new Error('Facebook did not accept the post yet. It will be tried again.');
+    if (await this.publishInstagramTargets(doc, true)) retry = true;
+    if (retry) throw new Error('The post was not accepted yet. It will be tried again.');
     this.finishPublishStatus(doc);
     await doc.save();
   }
@@ -452,8 +566,15 @@ export class PostsService {
         entry.error = entry.error || 'Facebook did not publish the post.';
       }
     }
+    for (const entry of doc.instagram) {
+      if (entry.status === 'pending') {
+        entry.status = 'failed';
+        entry.error = entry.error || 'Instagram did not publish the post.';
+      }
+    }
     this.finishPublishStatus(doc);
     doc.markModified('facebook');
+    doc.markModified('instagram');
     await doc.save();
   }
 
@@ -469,41 +590,72 @@ export class PostsService {
     aiGenerated?: boolean | null;
     firstComment?: string;
     commentPageIds?: string[];
+    instagramAccountIds?: string[];
+    instagramPostType?: InstagramPostType;
+    instagramCaption?: string;
+    instagramUserTags?: string;
+    instagramCollaborators?: string;
+    instagramAddOn?: string;
+    instagramPollOptions?: string;
+    instagramPollOpenEnded?: boolean;
   }) {
     const caption = input.caption ?? '';
     const firstComment = input.firstComment?.trim() || '';
+    const pageIds = this.uniqueIds(input.pageIds);
+    const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+      throw new BadRequestException('Select at least one connected account.');
+    }
     if (Array.from(caption).length > CAPTION_LIMIT) {
       throw new BadRequestException('Facebook text is over 63,206 characters.');
     }
     if (Array.from(firstComment).length > COMMENT_LIMIT) {
       throw new BadRequestException('A Facebook comment is limited to 8,000 characters.');
     }
-    const pageIds = [...new Set(input.pageIds.map((id) => id.trim()).filter(Boolean))];
-    if (pageIds.length === 0) throw new BadRequestException('Select at least one connected Facebook Page.');
     const postType = input.postType ?? 'feed';
     const files = input.files ?? [];
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
-    this.assertContent(postType, caption, files, kept.length);
+    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.length);
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
-    if (!user || !membership) throw new BadRequestException('Connect a Facebook Page before publishing.');
-    const targets = await this.targetsFor(membership.workspaceId, pageIds);
+    if (!user || !membership) throw new BadRequestException('Connect an account before publishing.');
+    const targets = pageIds.length > 0 ? await this.targetsFor(membership.workspaceId, pageIds) : [];
+    const instagramTargets =
+      instagramAccountIds.length > 0 ? await this.instagramTargetsFor(membership.workspaceId, instagramAccountIds) : [];
     const media = [...kept, ...(await this.uploadFiles(files))];
-    this.assertStored(postType, caption, media);
-    const allowComment = postType === 'feed' || postType === 'carousel';
+    if (pageIds.length > 0) this.assertStored(postType, caption, media);
+    const instagramPostType = input.instagramPostType ?? 'feed';
+    const instagramCaption = input.instagramCaption ?? caption;
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    const instagramDetails =
+      instagramTargets.length > 0
+        ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
+        : EMPTY_INSTAGRAM_DETAILS;
+    const commentPageIds = this.commentAccountIds({
+      pageIds,
+      facebookPostType: postType,
+      instagramAccountIds,
+      instagramPostType,
+      requested: input.commentPageIds ?? [],
+      firstComment,
+    });
+    if (commentPageIds.some((id) => instagramAccountIds.includes(id)) && Array.from(firstComment).length > INSTAGRAM_COMMENT_LIMIT) {
+      throw new BadRequestException('An Instagram comment is limited to 2,200 characters.');
+    }
     return {
       existing,
       userId: user.id,
       workspaceId: membership.workspaceId,
       caption,
-      firstComment: allowComment ? firstComment || null : null,
-      commentPageIds: allowComment ? (input.commentPageIds?.length ? input.commentPageIds : pageIds) : [],
+      firstComment: commentPageIds.length > 0 ? firstComment || null : null,
+      commentPageIds,
       videoTitle: input.videoTitle?.trim() || null,
       aiGenerated: input.aiGenerated ?? null,
-      postType,
+      postType: pageIds.length > 0 ? postType : instagramPostType,
       media,
       targets,
+      instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
     };
   }
 
@@ -531,6 +683,7 @@ export class PostsService {
       postType: prepared.postType,
       media: prepared.media,
       facebook,
+      instagram: prepared.instagram,
       ...extra,
     };
     if (prepared.existing) {
@@ -541,7 +694,6 @@ export class PostsService {
     return this.postModel.create({
       userId: prepared.userId,
       workspaceId: prepared.workspaceId,
-      instagram: [],
       linkedin: [],
       tiktok: [],
       publishAttempts: 0,
@@ -550,8 +702,9 @@ export class PostsService {
   }
 
   private finishPublishStatus(doc: PostDocument) {
-    const failed = doc.facebook.filter((item) => item.status === 'failed').length;
-    const published = doc.facebook.filter((item) => item.status === 'published').length;
+    const entries = [...doc.facebook, ...doc.instagram];
+    const failed = entries.filter((item) => item.status === 'failed').length;
+    const published = entries.filter((item) => item.status === 'published').length;
     doc.status = published === 0 ? 'failed' : failed > 0 ? 'partially_failed' : 'published';
     doc.completedAt = new Date();
   }
@@ -695,6 +848,327 @@ export class PostsService {
     }
   }
 
+  private commentAccountIds(input: {
+    pageIds: string[];
+    facebookPostType: FacebookPostType;
+    instagramAccountIds: string[];
+    instagramPostType: InstagramPostType;
+    requested: string[];
+    firstComment: string;
+  }): string[] {
+    if (!input.firstComment.trim()) return [];
+    const requested = new Set(this.uniqueIds(input.requested));
+    const pick = (ids: string[]) => (requested.size === 0 ? ids : ids.filter((id) => requested.has(id)));
+    const facebook =
+      input.pageIds.length > 0 && (input.facebookPostType === 'feed' || input.facebookPostType === 'carousel')
+        ? pick(input.pageIds)
+        : [];
+    const instagram =
+      input.instagramAccountIds.length > 0 && (input.instagramPostType === 'feed' || input.instagramPostType === 'reel')
+        ? pick(input.instagramAccountIds)
+        : [];
+    return [...facebook, ...instagram];
+  }
+
+  private uniqueIds(ids: string[]): string[] {
+    return [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+  }
+
+  private async instagramTargetsFor(workspaceId: string, accountIds: string[]) {
+    const targets: Array<{
+      connectedAccountId: string;
+      accountId: string;
+      name: string;
+      username: string | null;
+      host: 'instagram' | 'facebook';
+    }> = [];
+    for (const accountId of accountIds) {
+      const account = await this.connectedAccountsService.getInstagramAccountForPublish(workspaceId, accountId);
+      if (!account) {
+        throw new BadRequestException('Reconnect the Instagram account from Accounts.');
+      }
+      targets.push(account);
+    }
+    return targets;
+  }
+
+  private instagramEntries(
+    targets: Array<{ connectedAccountId: string; accountId: string; name: string; username: string | null; host: 'instagram' | 'facebook' }>,
+    postType: InstagramPostType,
+    caption: string,
+    details: InstagramDetails,
+  ) {
+    return targets.map((target) => {
+      const business = target.host === 'facebook' && postType !== 'story';
+      return {
+        connectedAccountId: target.connectedAccountId,
+        accountId: target.accountId,
+        name: target.name,
+        username: target.username,
+        postType,
+        caption: postType === 'story' ? '' : caption,
+        userTags: postType === 'story' ? [] : details.userTags,
+        collaborators: business ? details.collaborators : [],
+        addOn: business ? details.addOn : 'none',
+        pollOptions: business && details.addOn === 'poll' ? details.pollOptions : [],
+        pollOpenEnded: business && details.addOn === 'poll' ? details.pollOpenEnded : false,
+        instagramMediaId: null,
+        firstCommentId: null,
+        firstCommentError: null,
+        status: 'pending' as const,
+        publishedAt: null,
+        error: null,
+      };
+    });
+  }
+
+  private readInstagramExtras(input: {
+    instagramUserTags?: string;
+    instagramCollaborators?: string;
+    instagramAddOn?: string;
+    instagramPollOptions?: string;
+    instagramPollOpenEnded?: boolean;
+  }): InstagramDetails {
+    const addOn = input.instagramAddOn || 'none';
+    if (addOn !== 'none' && addOn !== 'poll' && addOn !== 'comment_prompt') {
+      throw new BadRequestException('Choose a poll, a comment prompt, or neither.');
+    }
+    return {
+      userTags: this.readUserTags(input.instagramUserTags),
+      collaborators: this.readUsernames(input.instagramCollaborators, 'collaborator'),
+      addOn,
+      pollOptions: this.readPollOptions(input.instagramPollOptions),
+      pollOpenEnded: input.instagramPollOpenEnded === true,
+    };
+  }
+
+  private instagramDetails(
+    postType: InstagramPostType,
+    caption: string,
+    media: PostMedia[],
+    details: InstagramDetails,
+    facebookLogin: boolean,
+  ): InstagramDetails {
+    if (postType === 'story') return EMPTY_INSTAGRAM_DETAILS;
+    if (details.userTags.length > 20) throw new BadRequestException('You can tag up to 20 people.');
+    const placeOnImage = postType === 'feed' && media[0]?.resourceType === 'image';
+    for (const tag of details.userTags) {
+      if (placeOnImage && (tag.x == null || tag.y == null || tag.x < 0 || tag.x > 1 || tag.y < 0 || tag.y > 1)) {
+        throw new BadRequestException('Click the image to place each tagged person.');
+      }
+    }
+    if (details.collaborators.length > 3) throw new BadRequestException('You can invite up to 3 collaborators.');
+    if (details.collaborators.length > 0 && !facebookLogin) {
+      throw new BadRequestException('Collaborators are available for Instagram accounts connected with Facebook Login.');
+    }
+    if ((details.addOn === 'poll' || details.addOn === 'comment_prompt') && !facebookLogin) {
+      throw new BadRequestException('Polls and comment prompts are available for Instagram accounts connected with Facebook Login.');
+    }
+    if (details.addOn === 'comment_prompt' && !caption.trim()) {
+      throw new BadRequestException('Add a caption. Instagram uses it as the comment prompt.');
+    }
+    if (details.addOn === 'poll') {
+      if (!caption.trim()) throw new BadRequestException('Add a caption. Instagram uses it as the poll question.');
+      if (details.pollOptions.length < 2 || details.pollOptions.length > 4) {
+        throw new BadRequestException('A poll needs 2 to 4 options.');
+      }
+      if (details.pollOptions.some((option) => Array.from(option).length > 25)) {
+        throw new BadRequestException('Each poll option can be 25 characters.');
+      }
+      const keys = ['option_a', 'option_b', 'option_c', 'option_d'];
+      const attachment = Object.fromEntries(details.pollOptions.map((option, index) => [keys[index], option]));
+      if (JSON.stringify(attachment).length > 200) {
+        throw new BadRequestException('Those poll options are too long for Instagram.');
+      }
+    }
+    return {
+      ...details,
+      userTags: details.userTags.map((tag) => (placeOnImage ? tag : { username: tag.username, x: null, y: null })),
+    };
+  }
+
+  private readUserTags(value: string | undefined): InstagramUserTagInput[] {
+    const rows = this.readJsonArray(value, 'The tagged accounts could not be read.');
+    const tags: InstagramUserTagInput[] = [];
+    for (const row of rows) {
+      const record = row && typeof row === 'object' ? (row as { username?: unknown; x?: unknown; y?: unknown }) : {};
+      const username = this.instagramUsername(record.username);
+      if (!username) throw new BadRequestException('Enter a public Instagram username to tag.');
+      if (tags.some((tag) => tag.username.toLowerCase() === username.toLowerCase())) continue;
+      const x = typeof record.x === 'number' ? record.x : null;
+      const y = typeof record.y === 'number' ? record.y : null;
+      tags.push({ username, x, y });
+    }
+    return tags;
+  }
+
+  private readPollOptions(value: string | undefined): string[] {
+    return this.readJsonArray(value, 'The poll options could not be read.')
+      .map((option) => (typeof option === 'string' ? option.trim() : ''))
+      .filter(Boolean);
+  }
+
+  private readUsernames(value: string | undefined, label: string): string[] {
+    const names: string[] = [];
+    for (const item of this.readJsonArray(value, `The ${label} list could not be read.`)) {
+      const username = this.instagramUsername(item);
+      if (!username) throw new BadRequestException(`Enter a public Instagram username for each ${label}.`);
+      if (!names.some((name) => name.toLowerCase() === username.toLowerCase())) names.push(username);
+    }
+    return names;
+  }
+
+  private readJsonArray(value: string | undefined, message: string): unknown[] {
+    if (!value?.trim()) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) throw new Error('not an array');
+      return parsed;
+    } catch {
+      throw new BadRequestException(message);
+    }
+  }
+
+  private instagramFailure(err: unknown, entry: { userTags?: Array<{ username: string }>; collaborators?: string[] }): string {
+    const fallback = err instanceof Error ? err.message : 'Instagram did not publish the post';
+    if (!(err instanceof InstagramGraphError) || err.code !== 110) return fallback;
+    const names = [
+      ...(entry.userTags ?? []).map((tag) => `@${tag.username}`),
+      ...(entry.collaborators ?? []).map((username) => `@${username}`),
+    ];
+    if (names.length === 0) return fallback;
+    return `Instagram could not find ${names.join(', ')}. Use a public account.`;
+  }
+
+  private instagramUsername(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const username = value.trim().replace(/^@+/, '');
+    return /^[A-Za-z0-9._]{1,30}$/.test(username) ? username : null;
+  }
+
+  private async publishInstagramTargets(doc: PostDocument, retryLater: boolean): Promise<boolean> {
+    let retry = false;
+    const commentTargets = new Set(doc.commentPageIds ?? []);
+    for (const entry of doc.instagram) {
+      const wantsComment =
+        (entry.postType === 'feed' || entry.postType === 'reel') &&
+        Boolean(doc.firstComment) &&
+        commentTargets.has(entry.connectedAccountId) &&
+        !entry.firstCommentId;
+      if (entry.status === 'published' && !wantsComment) continue;
+      const account = await this.connectedAccountsService.getInstagramAccountForPublish(doc.workspaceId, entry.connectedAccountId);
+      if (!account) {
+        if (entry.status !== 'published') {
+          entry.status = 'failed';
+          entry.error = 'This Instagram account is no longer connected.';
+        }
+        continue;
+      }
+      const media = doc.media[0];
+      if (entry.status !== 'published') {
+        if (!media) {
+          entry.status = 'failed';
+          entry.error = 'Instagram needs an image or a video.';
+          continue;
+        }
+        try {
+          entry.instagramMediaId = await this.instagramPublishService.publish({
+            accountId: account.accountId,
+            accessToken: account.accessToken,
+            host: account.host,
+            postType: entry.postType,
+            caption: entry.caption || '',
+            media,
+            userTags: entry.userTags ?? [],
+            collaborators: account.host === 'facebook' ? (entry.collaborators ?? []) : [],
+            addOn: account.host === 'facebook' ? (entry.addOn ?? 'none') : 'none',
+            pollOptions: account.host === 'facebook' ? (entry.pollOptions ?? []) : [],
+            pollOpenEnded: account.host === 'facebook' ? Boolean(entry.pollOpenEnded) : false,
+          });
+          entry.status = 'published';
+          entry.publishedAt = new Date();
+          entry.error = null;
+        } catch (err) {
+          const message = this.instagramFailure(err, entry);
+          if (retryLater && isRetryablePublishError(err)) {
+            entry.status = 'pending';
+            entry.error = message;
+            retry = true;
+          } else {
+            entry.status = 'failed';
+            entry.error = message;
+          }
+          doc.markModified('instagram');
+          await doc.save();
+          continue;
+        }
+      }
+      if (wantsComment && entry.instagramMediaId && doc.firstComment) {
+        try {
+          entry.firstCommentId = await this.instagramPublishService.publishComment({
+            mediaId: entry.instagramMediaId,
+            accessToken: account.accessToken,
+            host: account.host,
+            message: doc.firstComment,
+          });
+          entry.firstCommentError = null;
+        } catch (commentError) {
+          const message = commentError instanceof Error ? commentError.message : 'Instagram did not post the comment';
+          const missingPermission =
+            commentError instanceof InstagramGraphError &&
+            (commentError.code === 10 || commentError.code === 200 || commentError.code === 190);
+          entry.firstCommentError = missingPermission
+            ? `${message} Reconnect the Instagram account from Accounts so it can post comments.`
+            : message;
+        }
+      }
+      doc.markModified('instagram');
+      await doc.save();
+    }
+    return retry;
+  }
+
+  private assertInstagram(postType: InstagramPostType, caption: string, media: PostMedia[]) {
+    if ((postType === 'feed' || postType === 'reel') && Array.from(caption).length > INSTAGRAM_CAPTION_LIMIT) {
+      throw new BadRequestException('Instagram captions are limited to 2,200 characters.');
+    }
+    const item = media[0];
+    const format = item?.format?.toLowerCase() ?? '';
+    if (postType === 'feed') {
+      if (media.length !== 1 || item?.resourceType !== 'image') {
+        throw new BadRequestException('An Instagram Feed post needs one image.');
+      }
+      if (format && !['jpg', 'jpeg', 'png'].includes(format)) {
+        throw new BadRequestException('An Instagram Feed image needs to be a JPEG or PNG.');
+      }
+      return;
+    }
+    if (postType === 'reel') {
+      if (media.length !== 1 || item?.resourceType !== 'video') {
+        throw new BadRequestException('An Instagram Reel needs one video.');
+      }
+      if (format && !['mp4', 'mov'].includes(format)) {
+        throw new BadRequestException('An Instagram Reel needs an MP4 video.');
+      }
+      if (item.duration && (item.duration < 3 || item.duration > 90)) {
+        throw new BadRequestException('An Instagram Reel needs to be between 3 and 90 seconds.');
+      }
+      return;
+    }
+    if (media.length !== 1 || !item) {
+      throw new BadRequestException('An Instagram Story needs one image or one video.');
+    }
+    if (item.resourceType === 'image' && format && !['jpg', 'jpeg', 'png'].includes(format)) {
+      throw new BadRequestException('An Instagram Story image needs to be a JPEG or PNG.');
+    }
+    if (item.resourceType === 'video' && format && !['mp4', 'mov'].includes(format)) {
+      throw new BadRequestException('An Instagram Story video needs to be an MP4.');
+    }
+    if (item.resourceType === 'video' && item.duration && item.duration > 60) {
+      throw new BadRequestException('An Instagram Story video needs to be 60 seconds or shorter.');
+    }
+  }
+
   private toPublic(doc: PostDocument): PublicPost {
     return {
       id: doc.id,
@@ -712,6 +1186,29 @@ export class PostsService {
         pageId: item.pageId,
         pageName: item.pageName,
         facebookPostId: item.facebookPostId ?? null,
+        status: item.status,
+        publishedAt: item.publishedAt ?? null,
+        error: item.error ?? null,
+        firstCommentId: item.firstCommentId ?? null,
+        firstCommentError: item.firstCommentError ?? null,
+      })),
+      instagram: (doc.instagram ?? []).map((item) => ({
+        connectedAccountId: item.connectedAccountId,
+        accountId: item.accountId,
+        name: item.name,
+        username: item.username ?? null,
+        postType: item.postType,
+        caption: item.caption ?? '',
+        userTags: (item.userTags ?? []).map((tag) => ({
+          username: tag.username,
+          x: tag.x ?? null,
+          y: tag.y ?? null,
+        })),
+        collaborators: item.collaborators ?? [],
+        addOn: item.addOn ?? 'none',
+        pollOptions: item.pollOptions ?? [],
+        pollOpenEnded: item.pollOpenEnded ?? false,
+        instagramMediaId: item.instagramMediaId ?? null,
         status: item.status,
         publishedAt: item.publishedAt ?? null,
         error: item.error ?? null,
