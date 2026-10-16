@@ -7,11 +7,14 @@ import { UsersService } from '../users/users.service';
 import { CloudinaryService, UploadableFile } from './cloudinary.service';
 import { FacebookGraphError, FacebookPublishService } from './facebook-publish.service';
 import { InstagramGraphError, InstagramPublishService } from './instagram-publish.service';
+import { LinkedInPublishError, LinkedInPublishService } from './linkedin-publish.service';
 import { isRetryablePublishError, PostScheduleService } from './post-schedule.service';
 import {
   FacebookPostType,
   InstagramAddOn,
   InstagramPostType,
+  LinkedInPollDuration,
+  LinkedInPostType,
   Post,
   PostDocument,
   PostMedia,
@@ -28,6 +31,24 @@ type InstagramDetails = {
   pollOpenEnded: boolean;
 };
 
+type LinkedInFields = {
+  linkedinAccountIds?: string[];
+  linkedinPostType?: LinkedInPostType;
+  linkedinCaption?: string;
+  linkedinPollQuestion?: string;
+  linkedinPollOptions?: string;
+  linkedinPollDuration?: string;
+  linkedinCarouselTitle?: string;
+  linkedinPdf?: UploadableFile;
+};
+
+type LinkedInDetails = {
+  pollQuestion: string;
+  pollOptions: string[];
+  pollDuration: LinkedInPollDuration;
+  carouselTitle: string;
+};
+
 const EMPTY_INSTAGRAM_DETAILS: InstagramDetails = {
   userTags: [],
   collaborators: [],
@@ -37,6 +58,7 @@ const EMPTY_INSTAGRAM_DETAILS: InstagramDetails = {
 };
 
 const CAPTION_LIMIT = 63206;
+const LINKEDIN_CAPTION_LIMIT = 3000;
 const INSTAGRAM_CAPTION_LIMIT = 2200;
 const COMMENT_LIMIT = 8000;
 const INSTAGRAM_COMMENT_LIMIT = 2200;
@@ -84,6 +106,21 @@ export type PublicPost = {
     firstCommentId: string | null;
     firstCommentError: string | null;
   }>;
+  linkedin: Array<{
+    connectedAccountId: string;
+    accountId: string;
+    name: string;
+    postType: LinkedInPostType;
+    caption: string;
+    pollQuestion: string;
+    pollOptions: string[];
+    pollDuration: LinkedInPollDuration;
+    carouselTitle: string;
+    linkedinPostId: string | null;
+    status: 'pending' | 'published' | 'failed';
+    publishedAt: Date | null;
+    error: string | null;
+  }>;
   createdAt: Date;
   completedAt: Date | null;
 };
@@ -100,6 +137,7 @@ export class PostsService {
     private readonly cloudinaryService: CloudinaryService,
     private readonly facebookPublishService: FacebookPublishService,
     private readonly instagramPublishService: InstagramPublishService,
+    private readonly linkedInPublishService: LinkedInPublishService,
     @Inject(forwardRef(() => PostScheduleService))
     private readonly postScheduleService: PostScheduleService,
   ) {}
@@ -133,6 +171,14 @@ export class PostsService {
     instagramAddOn?: string;
     instagramPollOptions?: string;
     instagramPollOpenEnded?: boolean;
+    linkedinAccountIds?: string[];
+    linkedinPostType?: LinkedInPostType;
+    linkedinCaption?: string;
+    linkedinPollQuestion?: string;
+    linkedinPollOptions?: string;
+    linkedinPollDuration?: string;
+    linkedinCarouselTitle?: string;
+    linkedinPdf?: UploadableFile;
     files: UploadableFile[];
     keepPublicIds?: string[];
     postType: FacebookPostType;
@@ -144,7 +190,8 @@ export class PostsService {
     const firstComment = input.firstComment?.trim() || '';
     const pageIds = this.uniqueIds(input.pageIds);
     const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
-    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+    const linkedinAccountIds = this.uniqueIds(input.linkedinAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0 && linkedinAccountIds.length === 0) {
       throw new BadRequestException('Select at least one connected account.');
     }
     if (Array.from(caption).length > CAPTION_LIMIT) {
@@ -152,9 +199,6 @@ export class PostsService {
     }
     if (Array.from(firstComment).length > COMMENT_LIMIT) {
       throw new BadRequestException('A Facebook comment is limited to 8,000 characters.');
-    }
-    if (pageIds.length > 0) {
-      this.assertContent(input.postType, caption, input.files, input.keepPublicIds?.length ?? 0);
     }
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
@@ -167,11 +211,14 @@ export class PostsService {
     const uploaded = await this.uploadFiles(input.files);
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
-    const media = [...kept, ...uploaded];
-    if (pageIds.length > 0) this.assertStored(input.postType, input.caption ?? '', media);
+    const linkedIn = await this.withLinkedIn(membership.workspaceId, input, caption, [...kept, ...uploaded]);
+    const media = linkedIn.media;
+    const visual = this.visualMedia(media);
+    if (pageIds.length > 0) this.assertContent(input.postType, caption, input.files, kept.filter((item) => item.resourceType !== 'document').length);
+    if (pageIds.length > 0) this.assertStored(input.postType, input.caption ?? '', visual);
     const instagramPostType = input.instagramPostType ?? 'feed';
     const instagramCaption = input.instagramCaption ?? caption;
-    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, visual);
     const instagramDetails =
       instagramTargets.length > 0
         ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
@@ -181,7 +228,7 @@ export class PostsService {
       firstComment: input.firstComment?.trim() || null,
       videoTitle: input.videoTitle?.trim() || null,
       aiGenerated: input.aiGenerated ?? null,
-      postType: pageIds.length > 0 ? input.postType : instagramPostType,
+      postType: pageIds.length > 0 ? input.postType : instagramTargets.length > 0 ? instagramPostType : 'feed',
       status: 'draft' as const,
       media,
       facebook: targets.map((target) => ({
@@ -196,6 +243,7 @@ export class PostsService {
         firstCommentError: null,
       })),
       instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
+      linkedin: linkedIn.entries,
       completedAt: null,
     };
     if (existing) {
@@ -206,7 +254,6 @@ export class PostsService {
     const doc = await this.postModel.create({
       userId: user.id,
       workspaceId: membership.workspaceId,
-      linkedin: [],
       tiktok: [],
       ...fields,
     });
@@ -233,12 +280,21 @@ export class PostsService {
     instagramAddOn?: string;
     instagramPollOptions?: string;
     instagramPollOpenEnded?: boolean;
+    linkedinAccountIds?: string[];
+    linkedinPostType?: LinkedInPostType;
+    linkedinCaption?: string;
+    linkedinPollQuestion?: string;
+    linkedinPollOptions?: string;
+    linkedinPollDuration?: string;
+    linkedinCarouselTitle?: string;
+    linkedinPdf?: UploadableFile;
   }): Promise<PublicPost> {
     const caption = input.caption ?? '';
     const firstComment = input.firstComment?.trim() || '';
     const pageIds = this.uniqueIds(input.pageIds);
     const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
-    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+    const linkedinAccountIds = this.uniqueIds(input.linkedinAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0 && linkedinAccountIds.length === 0) {
       throw new BadRequestException('Select at least one connected account.');
     }
     if (Array.from(caption).length > CAPTION_LIMIT) {
@@ -252,7 +308,7 @@ export class PostsService {
     const files = input.files ?? [];
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
-    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.length);
+    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.filter((item) => item.resourceType !== 'document').length);
 
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
@@ -280,9 +336,11 @@ export class PostsService {
       throw new BadRequestException('An Instagram comment is limited to 2,200 characters.');
     }
 
-    const media = [...kept, ...(await this.uploadFiles(files))];
-    if (pageIds.length > 0) this.assertStored(postType, caption, media);
-    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    const linkedIn = await this.withLinkedIn(membership.workspaceId, input, caption, [...kept, ...(await this.uploadFiles(files))]);
+    const media = linkedIn.media;
+    const visual = this.visualMedia(media);
+    if (pageIds.length > 0) this.assertStored(postType, caption, visual);
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, visual);
     const instagramDetails =
       instagramTargets.length > 0
         ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
@@ -296,7 +354,7 @@ export class PostsService {
         userId: user.id,
         workspaceId: membership.workspaceId,
         instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
-        linkedin: [],
+        linkedin: linkedIn.entries,
         tiktok: [],
         caption,
         firstComment: commentTargets.size > 0 ? firstComment || null : null,
@@ -325,9 +383,11 @@ export class PostsService {
       existing.commentPageIds = [...commentTargets];
       existing.videoTitle = videoTitle;
       existing.aiGenerated = aiGenerated;
-      existing.postType = pageIds.length > 0 ? postType : instagramPostType;
+      existing.postType = pageIds.length > 0 ? postType : instagramTargets.length > 0 ? instagramPostType : 'feed';
       existing.status = 'publishing';
       existing.media = media;
+      existing.linkedin = linkedIn.entries;
+      existing.markModified('linkedin');
       existing.instagram = this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails);
       existing.facebook = targets.map((target) => ({
         connectedAccountId: target.connectedAccountId,
@@ -390,7 +450,8 @@ export class PostsService {
     }
 
     await this.publishInstagramTargets(doc, false);
-    const entries = [...doc.facebook, ...doc.instagram];
+    await this.publishLinkedInTargets(doc, false);
+    const entries = [...doc.facebook, ...doc.instagram, ...doc.linkedin];
     const failed = entries.filter((item) => item.status === 'failed').length;
     if (entries.length > 0 && failed === entries.length) {
       doc.status = 'draft';
@@ -552,6 +613,7 @@ export class PostsService {
     }
 
     if (await this.publishInstagramTargets(doc, true)) retry = true;
+    if (await this.publishLinkedInTargets(doc, true)) retry = true;
     if (retry) throw new Error('The post was not accepted yet. It will be tried again.');
     this.finishPublishStatus(doc);
     await doc.save();
@@ -572,9 +634,16 @@ export class PostsService {
         entry.error = entry.error || 'Instagram did not publish the post.';
       }
     }
+    for (const entry of doc.linkedin) {
+      if (entry.status === 'pending') {
+        entry.status = 'failed';
+        entry.error = entry.error || 'LinkedIn did not publish the post.';
+      }
+    }
     this.finishPublishStatus(doc);
     doc.markModified('facebook');
     doc.markModified('instagram');
+    doc.markModified('linkedin');
     await doc.save();
   }
 
@@ -598,12 +667,21 @@ export class PostsService {
     instagramAddOn?: string;
     instagramPollOptions?: string;
     instagramPollOpenEnded?: boolean;
+    linkedinAccountIds?: string[];
+    linkedinPostType?: LinkedInPostType;
+    linkedinCaption?: string;
+    linkedinPollQuestion?: string;
+    linkedinPollOptions?: string;
+    linkedinPollDuration?: string;
+    linkedinCarouselTitle?: string;
+    linkedinPdf?: UploadableFile;
   }) {
     const caption = input.caption ?? '';
     const firstComment = input.firstComment?.trim() || '';
     const pageIds = this.uniqueIds(input.pageIds);
     const instagramAccountIds = this.uniqueIds(input.instagramAccountIds ?? []);
-    if (pageIds.length === 0 && instagramAccountIds.length === 0) {
+    const linkedinAccountIds = this.uniqueIds(input.linkedinAccountIds ?? []);
+    if (pageIds.length === 0 && instagramAccountIds.length === 0 && linkedinAccountIds.length === 0) {
       throw new BadRequestException('Select at least one connected account.');
     }
     if (Array.from(caption).length > CAPTION_LIMIT) {
@@ -616,18 +694,20 @@ export class PostsService {
     const files = input.files ?? [];
     const existing = input.draftId ? await this.requireDraft(input.userId, input.draftId) : null;
     const kept = (existing?.media ?? []).filter((item) => input.keepPublicIds?.includes(item.publicId));
-    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.length);
+    if (pageIds.length > 0) this.assertContent(postType, caption, files, kept.filter((item) => item.resourceType !== 'document').length);
     const user = await this.usersService.findById(input.userId);
     const membership = user?.workspaces?.find((item) => item.status === 'active');
     if (!user || !membership) throw new BadRequestException('Connect an account before publishing.');
     const targets = pageIds.length > 0 ? await this.targetsFor(membership.workspaceId, pageIds) : [];
     const instagramTargets =
       instagramAccountIds.length > 0 ? await this.instagramTargetsFor(membership.workspaceId, instagramAccountIds) : [];
-    const media = [...kept, ...(await this.uploadFiles(files))];
-    if (pageIds.length > 0) this.assertStored(postType, caption, media);
+    const linkedIn = await this.withLinkedIn(membership.workspaceId, input, caption, [...kept, ...(await this.uploadFiles(files))]);
+    const media = linkedIn.media;
+    const visual = this.visualMedia(media);
+    if (pageIds.length > 0) this.assertStored(postType, caption, visual);
     const instagramPostType = input.instagramPostType ?? 'feed';
     const instagramCaption = input.instagramCaption ?? caption;
-    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, media);
+    if (instagramTargets.length > 0) this.assertInstagram(instagramPostType, instagramCaption, visual);
     const instagramDetails =
       instagramTargets.length > 0
         ? this.instagramDetails(instagramPostType, instagramCaption, media, this.readInstagramExtras(input), instagramTargets.some((target) => target.host === 'facebook'))
@@ -652,10 +732,11 @@ export class PostsService {
       commentPageIds,
       videoTitle: input.videoTitle?.trim() || null,
       aiGenerated: input.aiGenerated ?? null,
-      postType: pageIds.length > 0 ? postType : instagramPostType,
+      postType: pageIds.length > 0 ? postType : instagramTargets.length > 0 ? instagramPostType : 'feed',
       media,
       targets,
       instagram: this.instagramEntries(instagramTargets, instagramPostType, instagramCaption, instagramDetails),
+      linkedin: linkedIn.entries,
     };
   }
 
@@ -684,6 +765,7 @@ export class PostsService {
       media: prepared.media,
       facebook,
       instagram: prepared.instagram,
+      linkedin: prepared.linkedin,
       ...extra,
     };
     if (prepared.existing) {
@@ -694,7 +776,6 @@ export class PostsService {
     return this.postModel.create({
       userId: prepared.userId,
       workspaceId: prepared.workspaceId,
-      linkedin: [],
       tiktok: [],
       publishAttempts: 0,
       ...fields,
@@ -702,7 +783,7 @@ export class PostsService {
   }
 
   private finishPublishStatus(doc: PostDocument) {
-    const entries = [...doc.facebook, ...doc.instagram];
+    const entries = [...doc.facebook, ...doc.instagram, ...doc.linkedin];
     const failed = entries.filter((item) => item.status === 'failed').length;
     const published = entries.filter((item) => item.status === 'published').length;
     doc.status = published === 0 ? 'failed' : failed > 0 ? 'partially_failed' : 'published';
@@ -1064,7 +1145,7 @@ export class PostsService {
         }
         continue;
       }
-      const media = doc.media[0];
+      const media = doc.media.find((item) => item.resourceType === 'image' || item.resourceType === 'video');
       if (entry.status !== 'published') {
         if (!media) {
           entry.status = 'failed';
@@ -1169,6 +1250,153 @@ export class PostsService {
     }
   }
 
+  private visualMedia(media: PostMedia[]): PostMedia[] {
+    return media.filter((item) => item.resourceType !== 'document');
+  }
+
+  private async withLinkedIn(workspaceId: string, input: LinkedInFields, fallbackCaption: string, media: PostMedia[]) {
+    const accountIds = this.uniqueIds(input.linkedinAccountIds ?? []);
+    if (accountIds.length === 0) {
+      return { entries: [], media: this.visualMedia(media) };
+    }
+    const postType = input.linkedinPostType ?? 'normal';
+    const caption = (input.linkedinCaption ?? fallbackCaption).trim();
+    let nextMedia = postType === 'carousel' ? media : this.visualMedia(media);
+    if (postType === 'carousel' && input.linkedinPdf) {
+      const document = await this.cloudinaryService.uploadDocument(input.linkedinPdf);
+      nextMedia = [...this.visualMedia(media), document];
+    }
+    const details = this.linkedinDetails(postType, caption, nextMedia, input);
+    const targets = await this.linkedinTargetsFor(workspaceId, accountIds);
+    const ordered = [...this.visualMedia(nextMedia), ...nextMedia.filter((item) => item.resourceType === 'document')];
+    return { entries: this.linkedinEntries(targets, postType, caption, details), media: ordered };
+  }
+
+  private linkedinDetails(postType: LinkedInPostType, caption: string, media: PostMedia[], input: LinkedInFields): LinkedInDetails {
+    if (Array.from(caption).length > LINKEDIN_CAPTION_LIMIT) {
+      throw new BadRequestException('LinkedIn text is limited to 3,000 characters.');
+    }
+    const images = media.filter((item) => item.resourceType === 'image');
+    const documents = media.filter((item) => item.resourceType === 'document');
+    const imageFormat = (item: PostMedia) => item.format?.toLowerCase() ?? '';
+    if (postType === 'normal') {
+      if (!caption && images.length === 0) throw new BadRequestException('A LinkedIn post needs text or an image.');
+      if (images.length > 20) throw new BadRequestException('A LinkedIn post can include up to 20 images.');
+      if (images.some((item) => imageFormat(item) && !['jpg', 'jpeg', 'png', 'gif'].includes(imageFormat(item)))) {
+        throw new BadRequestException('LinkedIn images need to be JPEG, PNG, or GIF.');
+      }
+    }
+    const question = input.linkedinPollQuestion?.trim() ?? '';
+    const options = this.readStringList(input.linkedinPollOptions);
+    const duration = (['ONE_DAY', 'THREE_DAYS', 'SEVEN_DAYS', 'FOURTEEN_DAYS'] as const).find((item) => item === input.linkedinPollDuration) ?? 'SEVEN_DAYS';
+    const title = input.linkedinCarouselTitle?.trim() ?? '';
+    if (postType === 'poll') {
+      if (!question || Array.from(question).length > 140) throw new BadRequestException('A LinkedIn poll question can be 140 characters.');
+      if (options.length < 2 || options.length > 4) throw new BadRequestException('A LinkedIn poll needs 2 to 4 options.');
+      if (options.some((option) => Array.from(option).length > 30)) throw new BadRequestException('Each LinkedIn poll option can be 30 characters.');
+    }
+    if (postType === 'carousel') {
+      if (!title || Array.from(title).length > 400) throw new BadRequestException('A carousel title can be 400 characters.');
+      if (documents.length === 0 && (images.length < 1 || images.length > 20)) {
+        throw new BadRequestException('A LinkedIn carousel needs a PDF or 1 to 20 images.');
+      }
+      if (documents.length === 0 && images.some((item) => !['jpg', 'jpeg', 'png'].includes(imageFormat(item)))) {
+        throw new BadRequestException('Carousel images need to be JPEG or PNG. Upload a PDF to use other files.');
+      }
+    }
+    return { pollQuestion: question, pollOptions: options, pollDuration: duration, carouselTitle: title };
+  }
+
+  private readStringList(value: string | undefined): string[] {
+    if (!value?.trim()) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new BadRequestException('The LinkedIn poll options could not be read.');
+    }
+    if (!Array.isArray(parsed)) throw new BadRequestException('The LinkedIn poll options could not be read.');
+    return parsed.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
+  }
+
+  private async linkedinTargetsFor(workspaceId: string, accountIds: string[]) {
+    const targets: Array<{ connectedAccountId: string; accountId: string; name: string }> = [];
+    for (const accountId of accountIds) {
+      const account = await this.connectedAccountsService.getLinkedInAccountForPublish(workspaceId, accountId);
+      if (!account) throw new BadRequestException('Reconnect the LinkedIn profile from Accounts.');
+      targets.push(account);
+    }
+    return targets;
+  }
+
+  private linkedinEntries(
+    targets: Array<{ connectedAccountId: string; accountId: string; name: string }>,
+    postType: LinkedInPostType,
+    caption: string,
+    details: LinkedInDetails,
+  ) {
+    return targets.map((target) => ({
+      connectedAccountId: target.connectedAccountId,
+      accountId: target.accountId,
+      name: target.name,
+      postType,
+      caption,
+      pollQuestion: postType === 'poll' ? details.pollQuestion : '',
+      pollOptions: postType === 'poll' ? details.pollOptions : [],
+      pollDuration: details.pollDuration,
+      carouselTitle: postType === 'carousel' ? details.carouselTitle : '',
+      linkedinPostId: null,
+      status: 'pending' as const,
+      publishedAt: null,
+      error: null,
+    }));
+  }
+
+  private async publishLinkedInTargets(doc: PostDocument, retryLater: boolean): Promise<boolean> {
+    let retry = false;
+    for (const entry of doc.linkedin) {
+      if (entry.status === 'published') continue;
+      const account = await this.connectedAccountsService.getLinkedInAccountForPublish(doc.workspaceId, entry.connectedAccountId);
+      if (!account) {
+        entry.status = 'failed';
+        entry.error = 'This LinkedIn profile is no longer connected.';
+        doc.markModified('linkedin');
+        await doc.save();
+        continue;
+      }
+      try {
+        entry.linkedinPostId = await this.linkedInPublishService.publish({
+          accountId: account.accountId,
+          accessToken: account.accessToken,
+          postType: entry.postType,
+          caption: entry.caption || '',
+          media: doc.media,
+          pollQuestion: entry.pollQuestion || '',
+          pollOptions: entry.pollOptions ?? [],
+          pollDuration: entry.pollDuration,
+          carouselTitle: entry.carouselTitle || '',
+        });
+        entry.status = 'published';
+        entry.publishedAt = new Date();
+        entry.error = null;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'LinkedIn did not publish the post';
+        const retryableStatus = err instanceof LinkedInPublishError && (err.status === 429 || (err.status ?? 0) >= 500);
+        if (retryLater && (isRetryablePublishError(err) || retryableStatus)) {
+          entry.status = 'pending';
+          entry.error = message;
+          retry = true;
+        } else {
+          entry.status = 'failed';
+          entry.error = message;
+        }
+      }
+      doc.markModified('linkedin');
+      await doc.save();
+    }
+    return retry;
+  }
+
   private toPublic(doc: PostDocument): PublicPost {
     return {
       id: doc.id,
@@ -1214,6 +1442,21 @@ export class PostsService {
         error: item.error ?? null,
         firstCommentId: item.firstCommentId ?? null,
         firstCommentError: item.firstCommentError ?? null,
+      })),
+      linkedin: (doc.linkedin ?? []).map((item) => ({
+        connectedAccountId: item.connectedAccountId,
+        accountId: item.accountId,
+        name: item.name,
+        postType: item.postType,
+        caption: item.caption ?? '',
+        pollQuestion: item.pollQuestion ?? '',
+        pollOptions: item.pollOptions ?? [],
+        pollDuration: item.pollDuration ?? 'SEVEN_DAYS',
+        carouselTitle: item.carouselTitle ?? '',
+        linkedinPostId: item.linkedinPostId ?? null,
+        status: item.status,
+        publishedAt: item.publishedAt ?? null,
+        error: item.error ?? null,
       })),
       createdAt: doc.createdAt,
       completedAt: doc.completedAt ?? null,

@@ -14,6 +14,8 @@ import type { Response } from 'express';
 
 import { FacebookAuthService } from '../connected-accounts/facebook-auth.service';
 import { InstagramAuthService } from '../connected-accounts/instagram-auth.service';
+import { LinkedInAuthService } from '../connected-accounts/linkedin-auth.service';
+import { TikTokAuthService } from '../connected-accounts/tiktok-auth.service';
 import { SkipOriginCheck } from './decorators/skip-origin-check.decorator';
 import { ExchangeGoogleDto } from './dto/exchange-google.dto';
 import { GoogleAuthService } from './google-auth.service';
@@ -25,6 +27,8 @@ export class AuthController {
     private readonly googleAuthService: GoogleAuthService,
     private readonly facebookAuthService: FacebookAuthService,
     private readonly instagramAuthService: InstagramAuthService,
+    private readonly linkedInAuthService: LinkedInAuthService,
+    private readonly tikTokAuthService: TikTokAuthService,
   ) {}
 
   @Get('google')
@@ -96,6 +100,44 @@ export class AuthController {
       state,
       error,
       errorReason,
+      errorDescription,
+    });
+    return res.redirect(redirectUrl);
+  }
+
+  @Get('linkedin/callback')
+  @SkipOriginCheck()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async linkedInCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+    @Query('error_description') errorDescription: string | undefined,
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.linkedInAuthService.handleCallback({
+      code,
+      state,
+      error,
+      errorDescription,
+    });
+    return res.redirect(redirectUrl);
+  }
+
+  @Get('tiktok/callback')
+  @SkipOriginCheck()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async tikTokCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+    @Query('error_description') errorDescription: string | undefined,
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.tikTokAuthService.handleCallback({
+      code,
+      state,
+      error,
       errorDescription,
     });
     return res.redirect(redirectUrl);

@@ -135,6 +135,101 @@ export class InstagramAccount {
 
 export const InstagramAccountSchema = SchemaFactory.createForClass(InstagramAccount);
 
+@Schema({ _id: true, timestamps: false })
+export class LinkedInAccount {
+  _id?: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  accountId: string;
+
+  @Prop({ required: true, default: 'member' })
+  accountType: 'member';
+
+  @Prop({ required: true, trim: true })
+  name: string;
+
+  @Prop({ type: String, default: null })
+  email?: string | null;
+
+  @Prop({ type: String, default: null })
+  profileImageUrl?: string | null;
+
+  @Prop({ type: String, default: null })
+  encryptedAccessToken?: string | null;
+
+  @Prop({ type: Date, default: null })
+  tokenExpiresAt?: Date | null;
+
+  @Prop({ required: true })
+  connectedByUserId: string;
+
+  @Prop({ required: true, enum: accountStatuses, default: 'connected' })
+  status: AccountStatus;
+
+  @Prop({ default: false })
+  isDefault: boolean;
+
+  @Prop({ type: Date, default: () => new Date() })
+  connectedAt: Date;
+
+  @Prop({ type: Date, default: null })
+  lastSyncedAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  disconnectedAt?: Date | null;
+}
+
+export const LinkedInAccountSchema = SchemaFactory.createForClass(LinkedInAccount);
+
+@Schema({ _id: true, timestamps: false })
+export class TikTokAccount {
+  _id?: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  accountId: string;
+
+  @Prop({ required: true, trim: true })
+  name: string;
+
+  @Prop({ type: String, default: null })
+  username?: string | null;
+
+  @Prop({ type: String, default: null })
+  profileImageUrl?: string | null;
+
+  @Prop({ type: String, default: null })
+  encryptedAccessToken?: string | null;
+
+  @Prop({ type: String, default: null })
+  encryptedRefreshToken?: string | null;
+
+  @Prop({ type: Date, default: null })
+  tokenExpiresAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  refreshExpiresAt?: Date | null;
+
+  @Prop({ required: true })
+  connectedByUserId: string;
+
+  @Prop({ required: true, enum: accountStatuses, default: 'connected' })
+  status: AccountStatus;
+
+  @Prop({ default: false })
+  isDefault: boolean;
+
+  @Prop({ type: Date, default: () => new Date() })
+  connectedAt: Date;
+
+  @Prop({ type: Date, default: null })
+  lastSyncedAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  disconnectedAt?: Date | null;
+}
+
+export const TikTokAccountSchema = SchemaFactory.createForClass(TikTokAccount);
+
 @Schema({ timestamps: true, collection: 'connected_accounts' })
 export class ConnectedAccounts {
   @Prop({ required: true, index: true })
@@ -149,11 +244,11 @@ export class ConnectedAccounts {
   @Prop({ type: [InstagramAccountSchema], default: [] })
   instagram: InstagramAccount[];
 
-  @Prop({ type: [Object], default: [] })
-  linkedin: Record<string, unknown>[];
+  @Prop({ type: [LinkedInAccountSchema], default: [] })
+  linkedin: LinkedInAccount[];
 
-  @Prop({ type: [Object], default: [] })
-  tiktok: Record<string, unknown>[];
+  @Prop({ type: [TikTokAccountSchema], default: [] })
+  tiktok: TikTokAccount[];
 
   createdAt: Date;
 
@@ -165,3 +260,5 @@ export const ConnectedAccountsSchema = SchemaFactory.createForClass(ConnectedAcc
 
 ConnectedAccountsSchema.index({ workspaceId: 1, 'facebook.accountId': 1 });
 ConnectedAccountsSchema.index({ workspaceId: 1, 'instagram.accountId': 1 });
+ConnectedAccountsSchema.index({ workspaceId: 1, 'linkedin.accountId': 1 });
+ConnectedAccountsSchema.index({ workspaceId: 1, 'tiktok.accountId': 1 });

@@ -13,7 +13,7 @@ import {
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { FilesInterceptor } from '@nestjs/platform-express';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 
 import type { JwtAuthUser } from '../auth/auth.types';
@@ -21,11 +21,17 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UploadableFile } from './cloudinary.service';
 import { PostsService } from './posts.service';
-import { FacebookPostType, InstagramPostType } from './schemas/post.schema';
+import { FacebookPostType, InstagramPostType, LinkedInPostType } from './schemas/post.schema';
 
-const upload = FilesInterceptor('files', 10, {
-  limits: { fileSize: 100 * 1024 * 1024, files: 10 },
-});
+const upload = FileFieldsInterceptor(
+  [
+    { name: 'files', maxCount: 20 },
+    { name: 'linkedinPdf', maxCount: 1 },
+  ],
+  { limits: { fileSize: 100 * 1024 * 1024 } },
+);
+
+type UploadedPostFiles = { files?: UploadableFile[]; linkedinPdf?: UploadableFile[] };
 
 @ApiTags('Posts')
 @ApiBearerAuth()
@@ -45,7 +51,7 @@ export class PostsController {
   @UseInterceptors(upload)
   saveDraft(
     @CurrentUser() authUser: JwtAuthUser,
-    @UploadedFiles() files: UploadableFile[] | undefined,
+    @UploadedFiles() uploaded: UploadedPostFiles | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
     @Body('instagramAccountIds') instagramAccountIds?: string | string[],
@@ -56,6 +62,13 @@ export class PostsController {
     @Body('instagramAddOn') instagramAddOn?: string,
     @Body('instagramPollOptions') instagramPollOptions?: string,
     @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
+    @Body('linkedinAccountIds') linkedinAccountIds?: string | string[],
+    @Body('linkedinPostType') linkedinPostType?: string,
+    @Body('linkedinCaption') linkedinCaption?: string,
+    @Body('linkedinPollQuestion') linkedinPollQuestion?: string,
+    @Body('linkedinPollOptions') linkedinPollOptions?: string,
+    @Body('linkedinPollDuration') linkedinPollDuration?: string,
+    @Body('linkedinCarouselTitle') linkedinCarouselTitle?: string,
     @Body('firstComment') firstComment?: string,
     @Body('postType') postType?: string,
     @Body('videoTitle') videoTitle?: string,
@@ -72,7 +85,8 @@ export class PostsController {
       instagramPostType: this.instagramPostType(instagramPostType),
       instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
       ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
-      files: files ?? [],
+      files: uploaded?.files ?? [],
+      ...this.linkedinFields(uploaded, linkedinAccountIds, linkedinPostType, linkedinCaption, linkedinPollQuestion, linkedinPollOptions, linkedinPollDuration, linkedinCarouselTitle),
       keepPublicIds: this.optionalIds(keepPublicIds),
       postType: this.postType(postType),
       videoTitle: typeof videoTitle === 'string' ? videoTitle : '',
@@ -98,7 +112,7 @@ export class PostsController {
   @UseInterceptors(upload)
   schedule(
     @CurrentUser() authUser: JwtAuthUser,
-    @UploadedFiles() files: UploadableFile[] | undefined,
+    @UploadedFiles() uploaded: UploadedPostFiles | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
     @Body('instagramAccountIds') instagramAccountIds?: string | string[],
@@ -109,6 +123,13 @@ export class PostsController {
     @Body('instagramAddOn') instagramAddOn?: string,
     @Body('instagramPollOptions') instagramPollOptions?: string,
     @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
+    @Body('linkedinAccountIds') linkedinAccountIds?: string | string[],
+    @Body('linkedinPostType') linkedinPostType?: string,
+    @Body('linkedinCaption') linkedinCaption?: string,
+    @Body('linkedinPollQuestion') linkedinPollQuestion?: string,
+    @Body('linkedinPollOptions') linkedinPollOptions?: string,
+    @Body('linkedinPollDuration') linkedinPollDuration?: string,
+    @Body('linkedinCarouselTitle') linkedinCarouselTitle?: string,
     @Body('firstComment') firstComment?: string,
     @Body('commentPageIds') commentPageIds?: string | string[],
     @Body('postType') postType?: string,
@@ -128,7 +149,8 @@ export class PostsController {
       instagramPostType: this.instagramPostType(instagramPostType),
       instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
       ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
-      files: files ?? [],
+      files: uploaded?.files ?? [],
+      ...this.linkedinFields(uploaded, linkedinAccountIds, linkedinPostType, linkedinCaption, linkedinPollQuestion, linkedinPollOptions, linkedinPollDuration, linkedinCarouselTitle),
       keepPublicIds: this.optionalIds(keepPublicIds),
       draftId: draftId?.trim() || undefined,
       postType: this.postType(postType),
@@ -163,7 +185,7 @@ export class PostsController {
   @UseInterceptors(upload)
   publish(
     @CurrentUser() authUser: JwtAuthUser,
-    @UploadedFiles() files: UploadableFile[] | undefined,
+    @UploadedFiles() uploaded: UploadedPostFiles | undefined,
     @Body('caption') caption?: string,
     @Body('pageIds') pageIds?: string | string[],
     @Body('instagramAccountIds') instagramAccountIds?: string | string[],
@@ -174,6 +196,13 @@ export class PostsController {
     @Body('instagramAddOn') instagramAddOn?: string,
     @Body('instagramPollOptions') instagramPollOptions?: string,
     @Body('instagramPollOpenEnded') instagramPollOpenEnded?: string,
+    @Body('linkedinAccountIds') linkedinAccountIds?: string | string[],
+    @Body('linkedinPostType') linkedinPostType?: string,
+    @Body('linkedinCaption') linkedinCaption?: string,
+    @Body('linkedinPollQuestion') linkedinPollQuestion?: string,
+    @Body('linkedinPollOptions') linkedinPollOptions?: string,
+    @Body('linkedinPollDuration') linkedinPollDuration?: string,
+    @Body('linkedinCarouselTitle') linkedinCarouselTitle?: string,
     @Body('firstComment') firstComment?: string,
     @Body('commentPageIds') commentPageIds?: string | string[],
     @Body('postType') postType?: string,
@@ -190,7 +219,8 @@ export class PostsController {
       instagramPostType: this.instagramPostType(instagramPostType),
       instagramCaption: typeof instagramCaption === 'string' ? instagramCaption : undefined,
       ...this.instagramExtras(instagramUserTags, instagramCollaborators, instagramAddOn, instagramPollOptions, instagramPollOpenEnded),
-      files: files ?? [],
+      files: uploaded?.files ?? [],
+      ...this.linkedinFields(uploaded, linkedinAccountIds, linkedinPostType, linkedinCaption, linkedinPollQuestion, linkedinPollOptions, linkedinPollDuration, linkedinCarouselTitle),
       keepPublicIds: this.optionalIds(keepPublicIds),
       draftId: draftId?.trim() || undefined,
       postType: this.postType(postType),
@@ -199,6 +229,34 @@ export class PostsController {
       firstComment: typeof firstComment === 'string' ? firstComment : '',
       commentPageIds: this.optionalIds(commentPageIds),
     });
+  }
+
+  private linkedinFields(
+    uploaded: UploadedPostFiles | undefined,
+    linkedinAccountIds?: string | string[],
+    linkedinPostType?: string,
+    linkedinCaption?: string,
+    linkedinPollQuestion?: string,
+    linkedinPollOptions?: string,
+    linkedinPollDuration?: string,
+    linkedinCarouselTitle?: string,
+  ) {
+    return {
+      linkedinAccountIds: this.optionalIds(linkedinAccountIds),
+      linkedinPostType: this.linkedinPostType(linkedinPostType),
+      linkedinCaption: typeof linkedinCaption === 'string' ? linkedinCaption : undefined,
+      linkedinPollQuestion: typeof linkedinPollQuestion === 'string' ? linkedinPollQuestion : undefined,
+      linkedinPollOptions: typeof linkedinPollOptions === 'string' ? linkedinPollOptions : undefined,
+      linkedinPollDuration: typeof linkedinPollDuration === 'string' ? linkedinPollDuration : undefined,
+      linkedinCarouselTitle: typeof linkedinCarouselTitle === 'string' ? linkedinCarouselTitle : undefined,
+      linkedinPdf: uploaded?.linkedinPdf?.[0],
+    };
+  }
+
+  private linkedinPostType(value: string | undefined): LinkedInPostType | undefined {
+    if (!value) return undefined;
+    if (value === 'normal' || value === 'poll' || value === 'carousel') return value;
+    throw new BadRequestException('Choose a normal LinkedIn post, a poll, or a carousel.');
   }
 
   private instagramExtras(

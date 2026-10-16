@@ -38,8 +38,8 @@ export class PostMedia {
   @Prop({ required: true })
   secureUrl: string;
 
-  @Prop({ required: true, enum: ['image', 'video'] })
-  resourceType: 'image' | 'video';
+  @Prop({ required: true, enum: ['image', 'video', 'document'] })
+  resourceType: 'image' | 'video' | 'document';
 
   @Prop({ type: String, default: null })
   format?: string | null;
@@ -151,6 +151,58 @@ export class InstagramPostTarget {
 
 export const InstagramPostTargetSchema = SchemaFactory.createForClass(InstagramPostTarget);
 
+export const linkedinPostTypes = ['normal', 'poll', 'carousel'] as const;
+export type LinkedInPostType = (typeof linkedinPostTypes)[number];
+
+export const linkedinPollDurations = ['ONE_DAY', 'THREE_DAYS', 'SEVEN_DAYS', 'FOURTEEN_DAYS'] as const;
+export type LinkedInPollDuration = (typeof linkedinPollDurations)[number];
+
+@Schema({ _id: true })
+export class LinkedInPostTarget {
+  _id?: Types.ObjectId;
+
+  @Prop({ required: true })
+  connectedAccountId: string;
+
+  @Prop({ required: true })
+  accountId: string;
+
+  @Prop({ required: true })
+  name: string;
+
+  @Prop({ required: true, enum: linkedinPostTypes })
+  postType: LinkedInPostType;
+
+  @Prop({ type: String, default: '' })
+  caption: string;
+
+  @Prop({ type: String, default: '' })
+  pollQuestion: string;
+
+  @Prop({ type: [String], default: [] })
+  pollOptions: string[];
+
+  @Prop({ type: String, enum: linkedinPollDurations, default: 'SEVEN_DAYS' })
+  pollDuration: LinkedInPollDuration;
+
+  @Prop({ type: String, default: '' })
+  carouselTitle: string;
+
+  @Prop({ type: String, default: null })
+  linkedinPostId?: string | null;
+
+  @Prop({ required: true, enum: postPublishStatuses, default: 'pending' })
+  status: PostPublishStatus;
+
+  @Prop({ type: Date, default: null })
+  publishedAt?: Date | null;
+
+  @Prop({ type: String, default: null })
+  error?: string | null;
+}
+
+export const LinkedInPostTargetSchema = SchemaFactory.createForClass(LinkedInPostTarget);
+
 @Schema({ timestamps: true, collection: 'posts' })
 export class Post {
   @Prop({ required: true, index: true })
@@ -204,8 +256,8 @@ export class Post {
   @Prop({ type: [InstagramPostTargetSchema], default: [] })
   instagram: InstagramPostTarget[];
 
-  @Prop({ type: [Object], default: [] })
-  linkedin: Record<string, unknown>[];
+  @Prop({ type: [LinkedInPostTargetSchema], default: [] })
+  linkedin: LinkedInPostTarget[];
 
   @Prop({ type: [Object], default: [] })
   tiktok: Record<string, unknown>[];

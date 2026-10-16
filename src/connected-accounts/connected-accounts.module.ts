@@ -10,6 +10,8 @@ import { ConnectedAccountsController } from './connected-accounts.controller';
 import { ConnectedAccountsService } from './connected-accounts.service';
 import { FacebookAuthService } from './facebook-auth.service';
 import { InstagramAuthService } from './instagram-auth.service';
+import { LinkedInAuthService } from './linkedin-auth.service';
+import { TikTokAuthService } from './tiktok-auth.service';
 import {
   ConnectedAccounts,
   ConnectedAccountsSchema,
@@ -35,7 +37,7 @@ import {
     }),
   ],
   controllers: [ConnectedAccountsController],
-  providers: [ConnectedAccountsService, FacebookAuthService, InstagramAuthService],
-  exports: [FacebookAuthService, InstagramAuthService, ConnectedAccountsService],
+  providers: [ConnectedAccountsService, FacebookAuthService, InstagramAuthService, LinkedInAuthService, TikTokAuthService],
+  exports: [FacebookAuthService, InstagramAuthService, LinkedInAuthService, TikTokAuthService, ConnectedAccountsService],
 })
 export class ConnectedAccountsModule {}

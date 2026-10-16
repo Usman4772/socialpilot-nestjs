@@ -53,6 +53,24 @@ export class CloudinaryService {
     if (isDevelopment()) {
       this.logger.log(`Uploading ${resourceType} (${file.size} bytes, ${file.mimetype})`);
     }
+    const body = await this.send(file, resourceType);
+    if (isDevelopment()) {
+      this.logger.log(`Uploaded ${resourceType} ${body.public_id} in ${Date.now() - started}ms`);
+    }
+
+    return {
+      publicId: body.public_id!,
+      secureUrl: body.secure_url!,
+      resourceType,
+      format: body.format ?? null,
+      width: body.width ?? null,
+      height: body.height ?? null,
+      bytes: body.bytes ?? file.size,
+      duration: body.duration ?? null,
+    };
+  }
+
+  private async send(file: UploadableFile, resourceType: 'image' | 'video' | 'raw'): Promise<CloudinaryUploadResponse> {
     const cloudName = this.required('CLOUDINARY_CLOUD_NAME');
     const apiKey = this.required('CLOUDINARY_API_KEY');
     const apiSecret = this.required('CLOUDINARY_API_SECRET');
@@ -61,7 +79,6 @@ export class CloudinaryService {
     const signature = createHash('sha1')
       .update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`)
       .digest('hex');
-
     const form = new FormData();
     const bytes = new Uint8Array(file.buffer);
     form.append('file', new Blob([bytes], { type: file.mimetype }), file.originalname || 'upload');
@@ -69,7 +86,6 @@ export class CloudinaryService {
     form.append('timestamp', String(timestamp));
     form.append('signature', signature);
     form.append('folder', folder);
-
     let response: Awaited<ReturnType<typeof undiciFetch>>;
     try {
       response = await undiciFetch(`https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`, {
@@ -78,31 +94,37 @@ export class CloudinaryService {
         dispatcher: resourceType === 'video' ? videoDispatcher : imageDispatcher,
       });
     } catch (err) {
-      throw this.uploadFailed(resourceType, err);
+      throw this.uploadFailed(resourceType === 'raw' ? 'image' : resourceType, err);
     }
-
     let body: CloudinaryUploadResponse;
     try {
       body = (await response.json()) as CloudinaryUploadResponse;
     } catch (err) {
-      throw this.uploadFailed(resourceType, err);
+      throw this.uploadFailed(resourceType === 'raw' ? 'image' : resourceType, err);
     }
     if (!response.ok || !body.public_id || !body.secure_url) {
-      throw new BadRequestException(body.error?.message || this.friendlyMessage(resourceType));
+      throw new BadRequestException(body.error?.message || (resourceType === 'raw' ? 'The PDF could not be uploaded. Please try again.' : this.friendlyMessage(resourceType)));
     }
-    if (isDevelopment()) {
-      this.logger.log(`Uploaded ${resourceType} ${body.public_id} in ${Date.now() - started}ms`);
-    }
+    return body;
+  }
 
+  async uploadDocument(file: UploadableFile): Promise<PostMedia> {
+    if (file.mimetype !== 'application/pdf') {
+      throw new BadRequestException('A LinkedIn carousel file needs to be a PDF.');
+    }
+    if (file.size > 100 * 1024 * 1024) {
+      throw new BadRequestException('A LinkedIn carousel PDF must be 100 MB or smaller.');
+    }
+    const body = await this.send(file, 'raw');
     return {
-      publicId: body.public_id,
-      secureUrl: body.secure_url,
-      resourceType,
-      format: body.format ?? null,
-      width: body.width ?? null,
-      height: body.height ?? null,
+      publicId: body.public_id!,
+      secureUrl: body.secure_url!,
+      resourceType: 'document',
+      format: 'pdf',
+      width: null,
+      height: null,
       bytes: body.bytes ?? file.size,
-      duration: body.duration ?? null,
+      duration: null,
     };
   }
 

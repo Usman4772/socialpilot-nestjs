@@ -9,6 +9,8 @@ import {
   ConnectedAccountsDocument,
   FacebookPageAccount,
   InstagramAccount,
+  LinkedInAccount,
+  TikTokAccount,
 } from './schemas/connected-accounts.schema';
 
 export type FacebookPageInput = {
@@ -68,12 +70,54 @@ export type PublicInstagramAccount = {
   connectedAt: Date;
 };
 
+export type LinkedInMemberInput = {
+  accountId: string;
+  name: string;
+  email?: string | null;
+  profileImageUrl?: string | null;
+  accessToken: string;
+  tokenExpiresAt: Date | null;
+};
+
+export type PublicLinkedInAccount = {
+  id: string;
+  accountId: string;
+  name: string;
+  profileImageUrl: string | null;
+  accountType: 'member';
+  status: LinkedInAccount['status'];
+  isDefault: boolean;
+  connectedAt: Date;
+};
+
+export type TikTokAccountInput = {
+  accountId: string;
+  name: string;
+  username?: string | null;
+  profileImageUrl?: string | null;
+  accessToken: string;
+  refreshToken?: string | null;
+  tokenExpiresAt: Date | null;
+  refreshExpiresAt: Date | null;
+};
+
+export type PublicTikTokAccount = {
+  id: string;
+  accountId: string;
+  name: string;
+  username: string | null;
+  profileImageUrl: string | null;
+  status: TikTokAccount['status'];
+  isDefault: boolean;
+  connectedAt: Date;
+};
+
 export type PublicConnectedAccounts = {
   workspaceId: string | null;
   facebook: PublicFacebookPage[];
   instagram: PublicInstagramAccount[];
-  linkedin: Record<string, unknown>[];
-  tiktok: Record<string, unknown>[];
+  linkedin: PublicLinkedInAccount[];
+  tiktok: PublicTikTokAccount[];
 };
 
 @Injectable()
@@ -126,8 +170,30 @@ export class ConnectedAccountsService {
             connectedAt: account.connectedAt,
           };
         }),
-      linkedin: doc?.linkedin ?? [],
-      tiktok: doc?.tiktok ?? [],
+      linkedin: (doc?.linkedin ?? [])
+        .filter((account) => account.status !== 'disconnected')
+        .map((account) => ({
+          id: String(account._id),
+          accountId: account.accountId,
+          name: account.name,
+          profileImageUrl: account.profileImageUrl ?? null,
+          accountType: 'member' as const,
+          status: account.status,
+          isDefault: account.isDefault,
+          connectedAt: account.connectedAt,
+        })),
+      tiktok: (doc?.tiktok ?? [])
+        .filter((account) => account.status !== 'disconnected')
+        .map((account) => ({
+          id: String(account._id),
+          accountId: account.accountId,
+          name: account.name,
+          username: account.username ?? null,
+          profileImageUrl: account.profileImageUrl ?? null,
+          status: account.status,
+          isDefault: account.isDefault,
+          connectedAt: account.connectedAt,
+        })),
     };
   }
 
@@ -426,6 +492,153 @@ export class ConnectedAccountsService {
         account.encryptedAccessToken = null;
       }
     }
+    await doc.save();
+  }
+
+  async saveLinkedInMember(workspaceId: string, userId: string, account: LinkedInMemberInput): Promise<void> {
+    const key = this.encryptionKey();
+    let doc = await this.connectedAccountsModel.findOne({ workspaceId }).exec();
+    if (!doc) {
+      doc = new this.connectedAccountsModel({
+        userId,
+        workspaceId,
+        facebook: [],
+        instagram: [],
+        linkedin: [],
+        tiktok: [],
+      });
+    }
+    const now = new Date();
+    const encryptedAccessToken = encryptSecret(account.accessToken, key);
+    const existing = doc.linkedin.find((item) => item.accountId === account.accountId);
+    if (existing) {
+      existing.name = account.name;
+      existing.email = account.email ?? null;
+      existing.profileImageUrl = account.profileImageUrl ?? null;
+      existing.encryptedAccessToken = encryptedAccessToken;
+      existing.tokenExpiresAt = account.tokenExpiresAt;
+      existing.connectedByUserId = userId;
+      existing.status = 'connected';
+      existing.lastSyncedAt = now;
+      existing.disconnectedAt = null;
+      await doc.save();
+      return;
+    }
+    doc.linkedin.push({
+      accountId: account.accountId,
+      accountType: 'member',
+      name: account.name,
+      email: account.email ?? null,
+      profileImageUrl: account.profileImageUrl ?? null,
+      encryptedAccessToken,
+      tokenExpiresAt: account.tokenExpiresAt,
+      connectedByUserId: userId,
+      status: 'connected',
+      isDefault: !doc.linkedin.some((item) => item.isDefault && item.status === 'connected'),
+      connectedAt: now,
+      lastSyncedAt: now,
+      disconnectedAt: null,
+    });
+    await doc.save();
+  }
+
+  async getLinkedInAccountForPublish(
+    workspaceId: string,
+    accountSubdocumentId: string,
+  ): Promise<{ connectedAccountId: string; accountId: string; name: string; accessToken: string } | null> {
+    const doc = await this.findByWorkspace(workspaceId);
+    const account = doc?.linkedin.find((item) => String(item._id) === accountSubdocumentId);
+    if (!account || (account.status !== 'connected' && account.status !== 'expiring') || !account.encryptedAccessToken) {
+      return null;
+    }
+    if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() <= Date.now()) return null;
+    try {
+      return {
+        connectedAccountId: String(account._id),
+        accountId: account.accountId,
+        name: account.name,
+        accessToken: decryptSecret(account.encryptedAccessToken, this.encryptionKey()),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async saveTikTokAccount(workspaceId: string, userId: string, account: TikTokAccountInput): Promise<void> {
+    const key = this.encryptionKey();
+    let doc = await this.connectedAccountsModel.findOne({ workspaceId }).exec();
+    if (!doc) {
+      doc = new this.connectedAccountsModel({
+        userId,
+        workspaceId,
+        facebook: [],
+        instagram: [],
+        linkedin: [],
+        tiktok: [],
+      });
+    }
+    const now = new Date();
+    const encryptedAccessToken = encryptSecret(account.accessToken, key);
+    const encryptedRefreshToken = account.refreshToken ? encryptSecret(account.refreshToken, key) : null;
+    const existing = doc.tiktok.find((item) => item.accountId === account.accountId);
+    if (existing) {
+      existing.name = account.name;
+      existing.username = account.username ?? null;
+      existing.profileImageUrl = account.profileImageUrl ?? null;
+      existing.encryptedAccessToken = encryptedAccessToken;
+      existing.encryptedRefreshToken = encryptedRefreshToken;
+      existing.tokenExpiresAt = account.tokenExpiresAt;
+      existing.refreshExpiresAt = account.refreshExpiresAt;
+      existing.connectedByUserId = userId;
+      existing.status = 'connected';
+      existing.lastSyncedAt = now;
+      existing.disconnectedAt = null;
+      await doc.save();
+      return;
+    }
+    doc.tiktok.push({
+      accountId: account.accountId,
+      name: account.name,
+      username: account.username ?? null,
+      profileImageUrl: account.profileImageUrl ?? null,
+      encryptedAccessToken,
+      encryptedRefreshToken,
+      tokenExpiresAt: account.tokenExpiresAt,
+      refreshExpiresAt: account.refreshExpiresAt,
+      connectedByUserId: userId,
+      status: 'connected',
+      isDefault: !doc.tiktok.some((item) => item.isDefault && item.status === 'connected'),
+      connectedAt: now,
+      lastSyncedAt: now,
+      disconnectedAt: null,
+    });
+    await doc.save();
+  }
+
+  async disconnectTikTokAccount(workspaceId: string, accountSubdocumentId: string): Promise<void> {
+    const doc = await this.connectedAccountsModel.findOne({ workspaceId }).exec();
+    const account = doc?.tiktok.find((item) => String(item._id) === accountSubdocumentId);
+    if (!doc || !account) {
+      throw new NotFoundException('TikTok account was not found in this workspace');
+    }
+    account.status = 'disconnected';
+    account.disconnectedAt = new Date();
+    account.encryptedAccessToken = null;
+    account.encryptedRefreshToken = null;
+    account.isDefault = false;
+    await doc.save();
+  }
+
+  async disconnectLinkedInAccount(workspaceId: string, accountSubdocumentId: string): Promise<void> {
+    const doc = await this.connectedAccountsModel.findOne({ workspaceId }).exec();
+    const account = doc?.linkedin.find((item) => String(item._id) === accountSubdocumentId);
+    if (!doc || !account) {
+      throw new NotFoundException('LinkedIn account was not found in this workspace');
+    }
+    account.status = 'disconnected';
+    account.disconnectedAt = new Date();
+    account.encryptedAccessToken = null;
+    account.isDefault = false;
     await doc.save();
   }
 

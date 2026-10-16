@@ -8,6 +8,8 @@ import { UsersService } from '../users/users.service';
 import { ConnectedAccountsService } from './connected-accounts.service';
 import { FacebookAuthService } from './facebook-auth.service';
 import { InstagramAuthService } from './instagram-auth.service';
+import { LinkedInAuthService } from './linkedin-auth.service';
+import { TikTokAuthService } from './tiktok-auth.service';
 
 @ApiTags('Connected accounts')
 @ApiBearerAuth()
@@ -19,6 +21,8 @@ export class ConnectedAccountsController {
     private readonly connectedAccountsService: ConnectedAccountsService,
     private readonly facebookAuthService: FacebookAuthService,
     private readonly instagramAuthService: InstagramAuthService,
+    private readonly linkedInAuthService: LinkedInAuthService,
+    private readonly tikTokAuthService: TikTokAuthService,
   ) {}
 
   @Get()
@@ -53,6 +57,18 @@ export class ConnectedAccountsController {
     return { url };
   }
 
+  @Get('linkedin/start')
+  async startLinkedIn(@CurrentUser() authUser: JwtAuthUser) {
+    const url = await this.linkedInAuthService.buildAuthorizationUrl(authUser.userId);
+    return { url };
+  }
+
+  @Get('tiktok/start')
+  async startTikTok(@CurrentUser() authUser: JwtAuthUser) {
+    const url = await this.tikTokAuthService.buildAuthorizationUrl(authUser.userId);
+    return { url };
+  }
+
   @Delete('facebook/:pageId')
   async disconnectFacebook(@CurrentUser() authUser: JwtAuthUser, @Param('pageId') pageId: string) {
     const user = await this.usersService.findById(authUser.userId);
@@ -61,6 +77,30 @@ export class ConnectedAccountsController {
       return this.connectedAccountsService.toPublic(null, null);
     }
     await this.connectedAccountsService.disconnectFacebookPage(membership.workspaceId, pageId);
+    const doc = await this.connectedAccountsService.findByWorkspace(membership.workspaceId);
+    return this.connectedAccountsService.toPublic(doc, membership.workspaceId);
+  }
+
+  @Delete('tiktok/:accountId')
+  async disconnectTikTok(@CurrentUser() authUser: JwtAuthUser, @Param('accountId') accountId: string) {
+    const user = await this.usersService.findById(authUser.userId);
+    const membership = user?.workspaces?.find((item) => item.status === 'active');
+    if (!user || !membership) {
+      return this.connectedAccountsService.toPublic(null, null);
+    }
+    await this.connectedAccountsService.disconnectTikTokAccount(membership.workspaceId, accountId);
+    const doc = await this.connectedAccountsService.findByWorkspace(membership.workspaceId);
+    return this.connectedAccountsService.toPublic(doc, membership.workspaceId);
+  }
+
+  @Delete('linkedin/:accountId')
+  async disconnectLinkedIn(@CurrentUser() authUser: JwtAuthUser, @Param('accountId') accountId: string) {
+    const user = await this.usersService.findById(authUser.userId);
+    const membership = user?.workspaces?.find((item) => item.status === 'active');
+    if (!user || !membership) {
+      return this.connectedAccountsService.toPublic(null, null);
+    }
+    await this.connectedAccountsService.disconnectLinkedInAccount(membership.workspaceId, accountId);
     const doc = await this.connectedAccountsService.findByWorkspace(membership.workspaceId);
     return this.connectedAccountsService.toPublic(doc, membership.workspaceId);
   }

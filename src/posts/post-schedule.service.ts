@@ -142,6 +142,9 @@ export class PostScheduleService implements OnModuleInit, OnModuleDestroy {
 }
 
 export function isRetryablePublishError(err: unknown): boolean {
+  const status = typeof err === 'object' && err && 'status' in err ? Number(err.status) : undefined;
+  if (status === 429 || (status !== undefined && status >= 500)) return true;
+  if (status !== undefined && status >= 400) return false;
   const code = typeof err === 'object' && err && 'code' in err ? Number(err.code) : undefined;
   if (code === 1 || code === 2 || code === 4 || code === 17 || code === 32 || code === 613) return true;
   if (code === 10 || code === 100 || code === 190 || code === 200 || (code !== undefined && code >= 1363000)) return false;
